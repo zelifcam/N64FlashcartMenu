@@ -1619,9 +1619,12 @@ static void world_update(const vis_audio_t *audio) {
         o->cur_height = o->cur_height * 0.85f + BAR_MIN_HEIGHT * 0.15f;
     }
 
+    /* Use wall-clock time for starfield so it animates even when paused */
+    float frame_dt = (audio->dt > 0.0001f) ? audio->dt : 0.05f;
+
     formation_update(audio->dt);
     camera_update(audio);
-    starfield_update(audio->dt);
+    starfield_update(frame_dt);
 }
 
 /* Returns false if the bar is completely behind the camera and safe to skip.
