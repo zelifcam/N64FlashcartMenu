@@ -196,6 +196,11 @@ bool vis_session_is_active (void) {
 
 void vis_session_set_paused (bool is_paused) {
     paused = is_paused;
+    /* Show banner when pausing to display track info */
+    if (is_paused) {
+        banner_auto_active = true;
+        banner_auto_timer = BANNER_FADE_IN_TIME + BANNER_HOLD_TIME + BANNER_FADE_OUT_TIME;
+    }
 }
 
 void vis_session_notify_track_changed (const char *filename) {
