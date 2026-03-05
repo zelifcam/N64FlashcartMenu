@@ -714,7 +714,7 @@ static void formation_pos(formation_t form, int i, int total, uint32_t seed,
             float fx = hash_f(seed, i, 0) * 130.0f;
             float fz = hash_f(seed, i, 1) * 130.0f;
             float d = sqrtf(fx * fx + fz * fz);
-            if (d > 130.0f) { fx = fx / d * 130.0f; fz = fz / d * 130.0f; }
+            if (d > 130.0f && d > 0.001f) { fx = fx / d * 130.0f; fz = fz / d * 130.0f; }
             *out_x = fx; *out_z = fz;
             break;
         }
@@ -803,6 +803,7 @@ static void formation_pos(formation_t form, int i, int total, uint32_t seed,
         case FORM_VORTEX: {
             float theta = (float)(total - 1 - i) / total * 3.0f * T3D_PI;
             float r = 110.0f * expf(-0.18f * theta);
+            if (r < 0.001f) r = 0.001f;  /* Avoid denormal arithmetic */
             *out_x = fm_cosf(theta) * r;
             *out_z = fm_sinf(theta) * r;
             break;
@@ -862,7 +863,11 @@ static void formation_pos(formation_t form, int i, int total, uint32_t seed,
         case FORM_HEARTBEAT: {
             float t = (total > 1) ? (float)i / (total - 1) : 0.5f;
             float x = -150.0f + t * 300.0f;
-            float spike_z = -80.0f * expf(-x * x * 0.003f) - 30.0f * expf(-(x + 50.0f) * (x + 50.0f) * 0.02f);
+            float exp1 = expf(-x * x * 0.003f), exp2 = expf(-(x + 50.0f) * (x + 50.0f) * 0.02f);
+            /* Flush to zero to avoid denormal FPU exceptions on N64 */
+            if (exp1 < 0.001f) exp1 = 0.0f;
+            if (exp2 < 0.001f) exp2 = 0.0f;
+            float spike_z = -80.0f * exp1 - 30.0f * exp2;
             *out_x = x;
             *out_z = spike_z;
             break;
