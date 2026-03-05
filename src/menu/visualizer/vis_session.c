@@ -66,6 +66,10 @@ static vis_seek_cb     cb_seek    = NULL;
 static int  seek_hold_ticks = 0;
 static bool seek_inhibit    = false;
 
+/* Seek direction for UI indicator */
+static bool seek_direction_left  = false;   /* true if currently seeking left */
+static bool seek_direction_right = false;   /* true if currently seeking right */
+
 /* PCM read side — swapped each frame */
 static int pcm_read_idx   = 0;
 static int pcm_read_count = 0;
@@ -255,6 +259,9 @@ void vis_session_process (void) {
 
     /* C-left / C-right: seek (held, progressive ramp — mirrors music player) */
     bool seeking = (held.c_left || held.c_right) && !seek_inhibit;
+    seek_direction_left  = seeking && held.c_left;
+    seek_direction_right = seeking && held.c_right;
+
     if (seeking && cb_seek) {
         if (seek_hold_ticks < SEEK_RAMP_TICKS) seek_hold_ticks++;
         float duration = mp3player_get_duration();
@@ -426,6 +433,18 @@ static void draw_banner (void) {
     }
 }
 
+/* Draw seek indicator on bottom right when user is seeking */
+static void draw_seek_indicator (void) {
+    if (!seek_direction_left && !seek_direction_right) return;
+
+    const char *indicator = seek_direction_left ? "<<" : ">>";
+    int ix = DISPLAY_WIDTH - OVERSCAN_WIDTH - 32;  /* bottom right */
+    int iy = DISPLAY_HEIGHT - OVERSCAN_HEIGHT - 24;
+
+    rdpq_set_mode_standard();
+    rdpq_text_print(NULL, FNT_DEFAULT, ix, iy, indicator);
+}
+
 /*===========================================================================*/
 
 void vis_session_frame (surface_t *display) {
@@ -524,6 +543,12 @@ void vis_session_frame (surface_t *display) {
     if (banner_alpha > 0.0f) {
         rdpq_sync_pipe();
         draw_banner();
+    }
+
+    /* Seek indicator — always visible when seeking */
+    if (seek_direction_left || seek_direction_right) {
+        rdpq_sync_pipe();
+        draw_seek_indicator();
     }
 
     if (show_help && help_block) {
