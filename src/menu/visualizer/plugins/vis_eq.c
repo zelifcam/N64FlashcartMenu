@@ -38,7 +38,7 @@
 #define BAR_SIDES        6
 
 /* World */
-#define WORLD_RADIUS     420.0f         /* camera orbit radius reference */
+#define WORLD_RADIUS     380.0f         /* camera orbit radius reference */
 #define FLOOR_Y         -10.0f
 #define CEIL_Y           110.0f
 
@@ -209,6 +209,13 @@ static float   overhead_blend  = 0.0f;  /* 0=orbit, 1=straight-down overhead */
 static float   overhead_timer  = 0.0f;  /* accumulates; triggers overhead window */
 static float   overhead_period = 55.0f; /* randomised each cycle (45–75 s) */
 #define OVERHEAD_HOLD  8.0f             /* seconds to hold the overhead view */
+
+/* Occasional tight orbit for cinematic flair */
+static float   tight_orbit_blend  = 0.0f;  /* 0=normal, 1=tight (closer) */
+static float   tight_orbit_timer  = 0.0f;  /* accumulates; triggers tight zoom */
+static float   tight_orbit_period = 60.0f; /* randomised each cycle (50–80 s) */
+#define TIGHT_ORBIT_HOLD  5.0f              /* seconds to hold tight orbit */
+
 static uint32_t form_seed = 0;          /* re-randomized on each formation transition */
 
 /* Formation state machine */
@@ -1339,6 +1346,9 @@ static void camera_init(void) {
     overhead_blend = 0.0f;
     overhead_timer = 0.0f;
     overhead_period = 45.0f + rng_float(0.0f, 30.0f);
+    tight_orbit_blend = 0.0f;
+    tight_orbit_timer = 0.0f;
+    tight_orbit_period = 50.0f + rng_float(0.0f, 30.0f);
     cam_eye    = (T3DVec3){{ fm_cosf(cam_angle) * WORLD_RADIUS,
                              CEIL_Y * 0.5f,
                              fm_sinf(cam_angle) * WORLD_RADIUS }};
@@ -1350,10 +1360,10 @@ static void camera_update(const vis_audio_t *audio) {
     float frame_dt = (audio->dt > 0.0001f) ? audio->dt : 0.05f;  /* fallback to 50ms */
     wall_time += frame_dt;
 
-    /* Overhead blend — driven by periodic timer and fps < 15 (hysteresis: release at 19fps) */
+    /* Overhead blend — driven by periodic timer and fps < 10 (hysteresis: release at 14fps) */
     float fps = (audio->dt > 0.001f) ? 1.0f / audio->dt : 20.0f;
     overhead_timer += frame_dt;
-    bool perf_overhead = (overhead_blend > 0.5f) ? (fps < 19.0f) : (fps < 15.0f);
+    bool perf_overhead = (overhead_blend > 0.5f) ? (fps < 14.0f) : (fps < 10.0f);
     float overhead_target = (perf_overhead ||
                              overhead_timer > overhead_period - OVERHEAD_HOLD) ? 1.0f : 0.0f;
     if (overhead_timer >= overhead_period) {
@@ -1364,6 +1374,18 @@ static void camera_update(const vis_audio_t *audio) {
     overhead_blend += (overhead_target - overhead_blend) * blend_rate * frame_dt;
     if (overhead_blend < 0.0f) overhead_blend = 0.0f;
     if (overhead_blend > 1.0f) overhead_blend = 1.0f;
+
+    /* Occasional tight orbit — pulls camera closer for cinematic moments */
+    tight_orbit_timer += frame_dt;
+    float tight_orbit_target = (tight_orbit_timer > tight_orbit_period - TIGHT_ORBIT_HOLD) ? 1.0f : 0.0f;
+    if (tight_orbit_timer >= tight_orbit_period) {
+        tight_orbit_timer = 0.0f;
+        tight_orbit_period = 50.0f + rng_float(0.0f, 30.0f);
+    }
+    float tight_blend_rate = 0.1667f;  /* Faster than overhead — snappier camera moves */
+    tight_orbit_blend += (tight_orbit_target - tight_orbit_blend) * tight_blend_rate * frame_dt;
+    if (tight_orbit_blend < 0.0f) tight_orbit_blend = 0.0f;
+    if (tight_orbit_blend > 1.0f) tight_orbit_blend = 1.0f;
 
     /* Orbit — constant speed, always advancing */
     cam_angle += 0.10f * frame_dt;
@@ -1391,6 +1413,7 @@ static void camera_update(const vis_audio_t *audio) {
     float r = WORLD_RADIUS * cam_bar_scale
         * (1.0f - 0.35f * h_norm)           /* Height-based pullback */
         * form_cam_scale                    /* Formation-based zoom */
+        * (1.0f - 0.35f * tight_orbit_blend) /* Occasional tight cinematic zoom */
         * (1.0f + 0.07f * fm_sinf(wall_time * 0.11f));  /* Breathing modulation */
 
     float orbit_x  = fm_cosf(cam_angle) * r;
