@@ -947,6 +947,16 @@ static void formation_pos(formation_t form, int i, int total, uint32_t seed,
             *out_x = 0; *out_z = 0;
             break;
     }
+
+    /* Validate output: clamp to world bounds and ensure finite values */
+    float max_bound = 300.0f;
+    if (*out_x > max_bound) *out_x = max_bound;
+    if (*out_x < -max_bound) *out_x = -max_bound;
+    if (*out_z > max_bound) *out_z = max_bound;
+    if (*out_z < -max_bound) *out_z = -max_bound;
+    /* Catch any inf/nan from exponentials or divisions */
+    if (!isfinite(*out_x)) *out_x = 0.0f;
+    if (!isfinite(*out_z)) *out_z = 0.0f;
 }
 
 /* Return true if a formation is screen-filling and needs wider camera pullback */
