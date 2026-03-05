@@ -27,9 +27,9 @@
 #define BAR_MAX_HEIGHT   65.0f
 
 /* Maximum bar count — compile-time array size.
- * Active bar count is controlled at runtime via D-up/D-down (4–64, steps of 4). */
+ * Active bar count is controlled at runtime via D-up/D-down (8–64, steps of 4). */
 #define NUM_BARS         64
-#define BAR_COUNT_MIN    4
+#define BAR_COUNT_MIN    8
 #define BAR_COUNT_MAX    64
 #define BAR_COUNT_STEP   4
 #define BAR_COUNT_DEFAULT 32
