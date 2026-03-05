@@ -12,13 +12,14 @@ MENU_VERSION ?= "Rolling release"
 BUILD_TIMESTAMP = "$(shell TZ='UTC' date "+%Y-%m-%d %H:%M:%S %:z")"
 
 include $(N64_INST)/include/n64.mk
+include src/libs/tiny3d/t3d.mk
 
 N64_ROM_SAVETYPE = none
 N64_ROM_RTC = 1
 N64_ROM_REGIONFREE = 1
 N64_ROM_REGION = E
 
-N64_CFLAGS += -iquote $(SOURCE_DIR) -iquote $(ASSETS_DIR) -I $(SOURCE_DIR)/libs -isystem $(SOURCE_DIR)/libs/miniz -isystem $(SOURCE_DIR)/libs/libjpeg -flto=auto $(FLAGS)
+N64_CFLAGS += -iquote $(SOURCE_DIR) -iquote $(ASSETS_DIR) -I $(SOURCE_DIR)/libs -isystem $(SOURCE_DIR)/libs/miniz -isystem $(SOURCE_DIR)/libs/libjpeg -isystem $(SOURCE_DIR)/libs/kissfft -flto=auto $(FLAGS)
 
 SRCS = \
 	main.c \
@@ -62,6 +63,8 @@ SRCS = \
 	libs/libjpeg/jquant1.c \
 	libs/libjpeg/jquant2.c \
 	libs/libjpeg/jutils.c \
+	libs/kissfft/kiss_fft.c \
+	libs/kissfft/kiss_fftr.c \
 	libs/miniz/miniz_tdef.c \
 	libs/miniz/miniz_tinfl.c \
 	libs/miniz/miniz_zip.c \
@@ -103,6 +106,10 @@ SRCS = \
 	menu/views/load_emulator.c \
 	menu/views/load_rom.c \
 	menu/views/music_player.c \
+	menu/visualizer/fft.c \
+	menu/visualizer/vis_quality.c \
+	menu/visualizer/visualizer.c \
+	menu/visualizer/vis_session.c \
 	menu/views/startup.c \
 	menu/views/system_info.c \
 	menu/views/settings_editor.c \

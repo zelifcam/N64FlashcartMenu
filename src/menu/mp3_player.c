@@ -13,6 +13,7 @@
 #include "mp3_player.h"
 #include "sound.h"
 #include "utils/fs.h"
+#include "visualizer/vis_audio.h"
 #include "utils/utils.h"
 
 #define MINIMP3_IMPLEMENTATION
@@ -315,6 +316,13 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
             if (p->seek_predecode_frames > 0) {
                 p->seek_predecode_frames -= 1;
                 memset(out, 0, pcm_bytes);
+            } else if (vis_pcm.enabled) {
+                int count = samples * p->info.channels;
+                if (count > VIS_PCM_BUFFER_SIZE) count = VIS_PCM_BUFFER_SIZE;
+                memcpy(vis_pcm.buffers[vis_pcm.write_idx], pcm_buf, count * sizeof(int16_t));
+                vis_pcm.sample_count = count;
+                vis_pcm.channels     = p->info.channels;
+                vis_pcm.new_data     = true;
             }
 
             wlen -= samples;

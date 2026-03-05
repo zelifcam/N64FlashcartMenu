@@ -18,6 +18,7 @@
 #include "../path.h"
 #include "../fonts.h"
 #include "../ui_components/constants.h"
+#include "../visualizer/vis_session.h"
 #include "utils/fs.h"
 #include "views.h"
 
@@ -40,6 +41,7 @@ static cover_state_t cover_state = COVER_IDLE;
 static surface_t *cover_image = NULL;
 static int seek_hold_ticks = 0;
 static bool seek_inhibit = false;
+static menu_t *current_menu = NULL;
 
 /* Cached blit parameters — computed once when cover_image is set */
 static int cover_dst_x;
@@ -237,6 +239,14 @@ static bool try_skip_track (menu_t *menu, int direction) {
     return false;
 }
 
+static void vis_toggle_playback (void) {
+    mp3player_toggle();
+}
+
+static void vis_skip_track (int direction) {
+    if (current_menu) try_skip_track(current_menu, direction);
+}
+
 static void process (menu_t *menu) {
     mp3player_err_t err;
 
@@ -251,6 +261,15 @@ static void process (menu_t *menu) {
         if (!try_skip_track(menu, 1)) {
             advance_failed = true;
         }
+    }
+
+    joypad_buttons_t pressed = {0};
+    JOYPAD_PORT_FOREACH (i) {
+        pressed = joypad_get_buttons_pressed(i);
+        if (pressed.raw) break;
+    }
+    if (pressed.z) {
+        vis_session_enter();
     }
 
     if (menu->actions.back) {
@@ -413,6 +432,12 @@ static void draw (menu_t *menu, surface_t *d) {
         BTN_CU BTN_CD " Prev/Next  " BTN_CL BTN_CR " Seek\n"
     );
 
+    ui_components_actions_bar_text_draw(
+        STL_DEFAULT,
+        ALIGN_RIGHT, VALIGN_TOP,
+        BTN_Z " Visualizer\n"
+    );
+
     rdpq_detach_show();
 }
 
@@ -433,6 +458,8 @@ static void deinit (void) {
         cover_dir = NULL;
     }
     cover_dir_scan_active = false;
+    vis_session_deinit();
+    current_menu = NULL;
     sound_init_default();
     mp3player_deinit();
 }
@@ -468,13 +495,20 @@ void view_music_player_init (menu_t *menu) {
     }
 
     advance_failed = false;
+    current_menu = menu;
     load_cover_art(menu->browser.directory);
+    vis_session_init(vis_toggle_playback, vis_skip_track);
 }
 
 void view_music_player_display (menu_t *menu, surface_t *display) {
-    process(menu);
-
-    draw(menu, display);
+    if (vis_session_is_active()) {
+        vis_session_set_paused(!mp3player_is_playing());
+        vis_session_process();
+        vis_session_frame(display);
+    } else {
+        process(menu);
+        draw(menu, display);
+    }
 
     if (menu->next_mode != MENU_MODE_MUSIC_PLAYER) {
         deinit();

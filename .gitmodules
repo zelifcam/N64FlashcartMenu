@@ -19,3 +19,11 @@
 	path = src/libs/miniz
 	url = https://github.com/richgel999/miniz.git
 	ignore = dirty
+[submodule "src/libs/tiny3d"]
+	path = src/libs/tiny3d
+	url = https://github.com/HailToDodongo/tiny3d.git
+	ignore = dirty
+[submodule "src/libs/kissfft"]
+	path = src/libs/kissfft
+	url = https://github.com/mborgerding/kissfft.git
+	ignore = dirty
