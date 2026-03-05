@@ -48,10 +48,13 @@ static void draw (menu_t *menu, surface_t *d) {
         " no matter how small the commit.\n"
         "OSS software used:\n"
         " libdragon (UNLICENSE License)\n"
+        " libjpeg (IJG License)\n"
         " libspng (BSD 2-Clause License)\n"
+        " kissfft (BSD-3-Clause License)\n"
         " mini.c (BSD 2-Clause License)\n"
         " minimp3 (CC0 1.0 Universal)\n"
-        " miniz (MIT License)",
+        " miniz (MIT License)\n"
+        " tiny3d (MIT License)",
         MENU_VERSION,
         BUILD_TIMESTAMP
     );

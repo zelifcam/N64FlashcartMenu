@@ -92,9 +92,11 @@ Other license options may be available upon request with permissions of the orig
 * [libdragon](https://github.com/DragonMinded/libdragon/tree/preview) - [UNLICENSE License](https://github.com/DragonMinded/libdragon/blob/preview/LICENSE.md)
 * [libjpeg](https://www.ijg.org/) - [IJG License](https://www.ijg.org/files/README)
 * [libspng](https://github.com/randy408/libspng) - [BSD 2-Clause License](https://github.com/randy408/libspng/blob/master/LICENSE)
+* [kissfft](https://github.com/mborgerding/kissfft) - [BSD-3-Clause License](https://github.com/mborgerding/kissfft/blob/master/COPYING)
 * [mini.c](https://github.com/univrsal/mini.c) - [BSD 2-Clause License](https://github.com/univrsal/mini.c?tab=BSD-2-Clause-1-ov-file#readme)
 * [minimp3](https://github.com/lieff/minimp3) - [CC0 1.0 Universal](https://github.com/lieff/minimp3/blob/master/LICENSE)
 * [miniz](https://github.com/richgel999/miniz) - [MIT License](https://github.com/richgel999/miniz/blob/master/LICENSE)
+* [tiny3d](https://github.com/HailToDodongo/tiny3d) - [MIT License](https://github.com/HailToDodongo/tiny3d/blob/main/LICENSE)
 
 ## Sounds
 See [License](https://pixabay.com/en/service/license-summary/) for the following sounds:
