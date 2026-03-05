@@ -541,4 +541,13 @@ void vis_session_frame (surface_t *display) {
     }
 
     rdpq_detach_show();
+
+    /* Drain the RSP/RDP pipeline before returning.  sound_poll() calls
+     * rspq_highpri_sync(), which forces an immediate RSP context switch.
+     * If t3d triangle commands are still in-flight when that happens the
+     * RDP hits a hardware bug and crashes.  rspq_wait() blocks until both
+     * the RSP and RDP are idle, so the high-priority mixer runs on a clean
+     * pipeline.  The cost is negligible — display_try_get() at the top of
+     * the menu loop would stall here anyway waiting for a free framebuffer. */
+    rspq_wait();
 }

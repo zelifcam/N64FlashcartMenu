@@ -22,9 +22,9 @@
 
 /* EQ bars */
 #define BAR_WIDTH        5.0f           /* XZ half-extent */
-#define BAR_SPACING      10.0f          /* centre-to-centre */
+#define BAR_SPACING      14.0f          /* centre-to-centre */
 #define BAR_MIN_HEIGHT   3.0f
-#define BAR_MAX_HEIGHT   130.0f
+#define BAR_MAX_HEIGHT   65.0f
 
 /* Maximum bar count — compile-time array size.
  * Active bar count is controlled at runtime via D-up/D-down (4–64, steps of 4). */
@@ -38,7 +38,7 @@
 #define BAR_SIDES        6
 
 /* World */
-#define WORLD_RADIUS     420.0f         /* camera orbit radius reference */
+#define WORLD_RADIUS     260.0f         /* camera orbit radius reference */
 #define FLOOR_Y         -10.0f
 #define CEIL_Y           110.0f
 
@@ -47,10 +47,13 @@
 #define CAM_FAR          600.0f
 #define CAM_FOV          T3D_DEG_TO_RAD(70.0f)
 
+/* Frustum cull tunables */
+#define CULL_HEIGHT_BIAS  0.6f  /* fraction of cur_height added to behind-camera slack (accounts for tall bars) */
+
 /* Formation morphing */
 #define MORPH_SPEED      0.25f          /* lerp rate per second — slow, organic ease-out */
-#define HOLD_LINE_MIN    40.0f          /* min seconds to hold line formation */
-#define HOLD_LINE_MAX    70.0f          /* max seconds to hold line formation */
+#define HOLD_LINE_MIN    20.0f          /* min seconds to hold line formation */
+#define HOLD_LINE_MAX    35.0f          /* max seconds to hold line formation */
 #define HOLD_OTHER_MIN   25.0f          /* min seconds to hold non-line formation */
 #define HOLD_OTHER_MAX   45.0f          /* max seconds to hold non-line formation */
 
@@ -727,13 +730,12 @@ static void camera_update(float dt) {
      * the top (~60% of time above midpoint) rather than clustering at mid. */
     float slow = fm_sinf(cam_time * 0.0785f);   /* ~80s period */
     float fast = fm_sinf(cam_time * 0.273f);    /* ~23s period */
-    float h_raw = 0.5f + 0.45f * slow + 0.20f * fast;
+    /* Centre of oscillation at 0.72 — only dips low when both sines go negative
+     * simultaneously, which happens ~25% of the time.  Gives ~75% overhead. */
+    float h_raw = 0.72f + 0.20f * slow + 0.12f * fast;
     if (h_raw < 0.0f) h_raw = 0.0f;
     if (h_raw > 1.0f) h_raw = 1.0f;
-    /* Power curve skews distribution toward 1: h^0.45 maps 0.5->0.73, 0.3->0.56.
-     * Camera now spends the majority of its journey in the upper half. */
     float h_norm = h_raw * h_raw * (3.0f - 2.0f * h_raw); /* smoothstep */
-    h_norm = h_norm * h_norm;                               /* square again — heavy top bias */
 
     /* Radius: three factors multiply together.
      * 1) Height factor: pull in when overhead (28% at top, 100% at floor).
@@ -849,8 +851,7 @@ static void starfield_init(void) {
     star_draw_count = STAR_COUNT_MAX;
 }
 
-static void starfield_update(float dt, float bass) {
-    (void)bass;
+static void starfield_update(float dt) {
     for (int i = 0; i < star_draw_count; i++) {
         stars[i].z -= stars[i].speed * dt;
         if (stars[i].z < 1.0f) {
@@ -1007,7 +1008,31 @@ static void world_update(const vis_audio_t *audio) {
 
     formation_update(audio->dt);
     camera_update(audio->dt);
-    starfield_update(audio->dt, s_star_bass);
+    starfield_update(audio->dt);
+}
+
+/* Returns false if the bar is completely behind the camera and safe to skip.
+ * This is the only cull that is guaranteed never to cause visible popping —
+ * a bar truly behind the camera is 100% invisible regardless of its height.
+ *
+ * The slack term accounts for tall bars: the camera could be positioned beside
+ * a bar and looking slightly past it, so the tip is still in frame even though
+ * the base is behind the forward plane.  CULL_HEIGHT_BIAS controls this margin.
+ *
+ * Horizontal FOV culling is intentionally omitted — it requires tight tuning
+ * to avoid popping as the camera orbits, and the behind-camera test already
+ * covers the high-cost case (close orbit, bars on the far side of the formation). */
+static bool bar_in_frustum(const world_obj_t *o,
+                            float fx, float fy, float fz)   /* normalised 3D forward */
+{
+    float mid_y = FLOOR_Y + o->cur_height * 0.5f;
+    float dx = o->pos_x - cam_eye.v[0];
+    float dy = mid_y    - cam_eye.v[1];
+    float dz = o->pos_z - cam_eye.v[2];
+
+    float fwd_dot = dx*fx + dy*fy + dz*fz;
+    float slack   = o->cur_height * CULL_HEIGHT_BIAS + BAR_WIDTH * 2.0f;
+    return (fwd_dot >= -slack);
 }
 
 static void world_render(const vis_audio_t *audio) {
@@ -1028,14 +1053,16 @@ static void world_render(const vis_audio_t *audio) {
     rdpq_mode_combiner(RDPQ_COMBINER_SHADE);
     t3d_state_set_drawflags(T3D_FLAG_SHADED);
 
-    /* Sort all bars back-to-front (painter's order) by distance from camera.
+    /* Normalised 3D forward vector for behind-camera cull test. */
+    float ftx = cam_target.v[0] - cam_eye.v[0];
+    float fty = cam_target.v[1] - cam_eye.v[1];
+    float ftz = cam_target.v[2] - cam_eye.v[2];
+    float flen = sqrtf(ftx*ftx + fty*fty + ftz*ftz);
+    if (flen > 0.000001f) { float inv = 1.0f / flen; ftx *= inv; fty *= inv; ftz *= inv; }
+
+    /* Sort all bars back-to-front (painter's order) by depth along forward XZ.
      * Include inactive bars that are still shrinking (cur_height > floor + epsilon)
      * so they animate out smoothly rather than popping off. */
-    float fx = cam_target.v[0] - cam_eye.v[0];
-    float fz = cam_target.v[2] - cam_eye.v[2];
-    float flen2 = fx*fx + fz*fz;
-    if (flen2 > 0.000001f) { float inv = 1.0f / sqrtf(flen2); fx *= inv; fz *= inv; }
-
     int   order[NUM_BARS];
     float depths[NUM_BARS];
     int   draw_count = 0;
@@ -1043,10 +1070,12 @@ static void world_render(const vis_audio_t *audio) {
     for (int i = 0; i < NUM_BARS; i++) {
         /* Skip inactive bars that have fully settled to the floor */
         if (i >= obj_count && objects[i].cur_height <= BAR_MIN_HEIGHT + 0.5f) continue;
+        /* Behind-camera cull — skip bars the camera cannot possibly see */
+        if (!bar_in_frustum(&objects[i], ftx, fty, ftz)) continue;
         world_obj_t *o = &objects[i];
         float dx = o->pos_x - cam_eye.v[0];
         float dz = o->pos_z - cam_eye.v[2];
-        float depth = dx*fx + dz*fz;
+        float depth = dx*ftx + dz*ftz;
 
         /* Insertion sort: farthest first */
         int pos = draw_count++;
