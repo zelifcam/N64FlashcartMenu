@@ -1636,7 +1636,7 @@ static void world_update(const vis_audio_t *audio) {
     }
 
     /* Fixed star count for consistent visual density */
-    star_draw_count = 48;
+    star_draw_count = 96;
 
     /* Shrink inactive bars smoothly to the floor so they disappear gracefully */
     for (int i = obj_count; i < NUM_BARS; i++) {
