@@ -108,7 +108,7 @@ typedef struct {
     float max_height;      /* height at band energy = 1.0           */
     float cur_height;      /* smoothed current height               */
     float pos_x, pos_z;    /* world position (lerped current)       */
-    float tgt_x, tgt_z;   /* world position target for this frame  */
+    float tgt_x, tgt_z;   /* persistent morph target, updated on formation change */
     uint32_t color;        /* RGBA packed vertex color              */
     int   band_lo;         /* first FFT band driving this object    */
     int   band_hi;         /* last  FFT band driving this object    */
@@ -158,6 +158,7 @@ static float       form_cam_scale = 1.0f;      /* smoothed camera radius scale: 
 /* Dynamic bar count — D-up/D-down steps through 4,8,...,64 */
 static int   target_bar_count  = BAR_COUNT_DEFAULT;
 static float display_bar_count = BAR_COUNT_DEFAULT; /* smoothed, drives obj_count */
+static bool  auto_bar_picked   = false;             /* tracks if we've picked auto target for this formation */
 
 /* Starfield background.
  * Array always holds STAR_COUNT_MAX stars; active draw count scales inversely
@@ -182,6 +183,26 @@ static uint32_t rng_next(void) {
 /* float in [lo, hi] */
 static float rng_float(float lo, float hi) {
     return lo + ((float)(rng_next() & 0xFFFF) / 65535.0f) * (hi - lo);
+}
+
+/*===========================================================================
+ * Band and color assignment
+ *===========================================================================*/
+
+/* Assign FFT band range and spectrum color to a bar object.
+ * Color spreads bass(red) → mid(green) → treble(blue) across all active bars. */
+static void assign_band_color(world_obj_t *o, int i, int n) {
+    /* FFT band assignment: divide FFT_NUM_BANDS evenly across n bars */
+    o->band_lo = (i * FFT_NUM_BANDS) / n;
+    o->band_hi = ((i + 1) * FFT_NUM_BANDS) / n - 1;
+    if (o->band_hi < o->band_lo) o->band_hi = o->band_lo;
+    if (o->band_hi >= FFT_NUM_BANDS) o->band_hi = FFT_NUM_BANDS - 1;
+
+    /* Spectrum color: interpolate across spectrum based on bar position */
+    float t = (n > 1) ? (float)i / (n - 1) : 0.0f;
+    o->color = ((uint32_t)((uint8_t)((1.0f - t) * 255)) << 24) |
+               ((uint32_t)((uint8_t)(fm_sinf(t * T3D_PI) * 220)) << 16) |
+               ((uint32_t)((uint8_t)(t * 255)) << 8) | 0xFF;
 }
 
 
@@ -446,8 +467,7 @@ static void formation_pos(formation_t form, int i, int total, float *out_x, floa
         }
         case FORM_GRID_SQUARE: {
             /* Square grid: cols = rows = floor(sqrt(total)) */
-            int cols = 1;
-            while ((cols + 1) * (cols + 1) <= total) cols++;
+            int cols = (int)sqrtf((float)total);
             if (cols < 1) cols = 1;
             int col = i % cols, row = i / cols;
             float spacing = 20.0f;
@@ -554,6 +574,18 @@ static void formation_update(float dt) {
 
     /* Hold timer — count down, then pick a new formation */
     form_hold_remaining -= dt;
+
+    /* ~10s before transition, pick a new autonomous bar count target (for cinematic lead-in) */
+    if (form_hold_remaining < 10.0f && !auto_bar_picked) {
+        auto_bar_picked = true;
+        int new_target = BAR_COUNT_MIN + (int)(rng_next() % ((BAR_COUNT_MAX - BAR_COUNT_MIN) / BAR_COUNT_STEP + 1)) * BAR_COUNT_STEP;
+        /* Ensure we pick a different value if possible */
+        if (new_target == target_bar_count && BAR_COUNT_MAX > BAR_COUNT_MIN) {
+            new_target = (new_target == BAR_COUNT_MAX) ? (BAR_COUNT_MAX - BAR_COUNT_STEP) : (BAR_COUNT_MAX);
+        }
+        target_bar_count = new_target;
+    }
+
     if (form_hold_remaining <= 0.0f) {
         formation_t next = formation_pick_next();
         form_current = next;
@@ -563,6 +595,9 @@ static void formation_update(float dt) {
             form_hold_remaining = rng_float(HOLD_LINE_MIN, HOLD_LINE_MAX);
         else
             form_hold_remaining = rng_float(HOLD_OTHER_MIN, HOLD_OTHER_MAX);
+
+        /* Reset auto target picker for the next formation hold period */
+        auto_bar_picked = false;
     }
 
     /* Camera radius target: line needs full pullback (1.0), compact shapes
@@ -789,7 +824,7 @@ static void camera_update(const vis_audio_t *audio) {
         overhead_timer  = 0.0f;
         overhead_period = 45.0f + rng_float(0.0f, 30.0f);
     }
-    float blend_rate = 0.0833f;  /* Same speed in both directions — ~12s at 20fps */
+    float blend_rate = 0.0833f;  /* Same speed in both directions — time constant ~12s (95% in ~36s) */
     overhead_blend += (overhead_target - overhead_blend) * blend_rate * frame_dt;
     if (overhead_blend < 0.0f) overhead_blend = 0.0f;
     if (overhead_blend > 1.0f) overhead_blend = 1.0f;
@@ -867,19 +902,8 @@ static void world_roll(void) {
         o->max_height = BAR_MAX_HEIGHT;
         o->cur_height = BAR_MIN_HEIGHT;
 
-        /* Assign band range and color spread across active slots only */
-        int n = obj_count;
-        o->band_lo = (i * FFT_NUM_BANDS) / n;
-        o->band_hi = ((i + 1) * FFT_NUM_BANDS) / n - 1;
-        if (o->band_hi < o->band_lo) o->band_hi = o->band_lo;
-        if (o->band_hi >= FFT_NUM_BANDS) o->band_hi = FFT_NUM_BANDS - 1;
-
-        /* Spectrum color: bass(red) → mid(green) → treble(blue) */
-        float ct = (n > 1) ? (float)i / (n - 1) : 0.0f;
-        uint8_t cr = (uint8_t)((1.0f - ct) * 255);
-        uint8_t cg = (uint8_t)(fm_sinf(ct * T3D_PI) * 220);
-        uint8_t cb = (uint8_t)(ct * 255);
-        o->color = ((uint32_t)cr << 24) | ((uint32_t)cg << 16) | ((uint32_t)cb << 8) | 0xFF;
+        /* Assign band range and spectrum color */
+        assign_band_color(o, i, obj_count);
 
         formation_pos(FORM_LINE, i, BAR_COUNT_DEFAULT, &o->pos_x, &o->pos_z);
         o->tgt_x = o->pos_x;
@@ -892,6 +916,7 @@ static void world_roll(void) {
     form_current        = FORM_LINE;
     form_hold_remaining = rng_float(HOLD_LINE_MIN, HOLD_LINE_MAX);
     form_cam_scale      = 1.0f;
+    auto_bar_picked     = false;
     formation_set_targets(FORM_LINE);
 }
 
@@ -992,9 +1017,9 @@ static void world_update(const vis_audio_t *audio) {
     if (pressed.d_down && target_bar_count > BAR_COUNT_MIN)
         target_bar_count -= BAR_COUNT_STEP;
 
-    /* Smoothly lerp display_bar_count toward target (~6 bars/sec) */
+    /* Smoothly lerp display_bar_count toward target (~1.5 bars/sec — autonomous drift is very slow) */
     float bar_diff = (float)target_bar_count - display_bar_count;
-    display_bar_count += bar_diff * (audio->dt * 6.0f);
+    display_bar_count += bar_diff * (audio->dt * 1.5f);
     if (display_bar_count < BAR_COUNT_MIN) display_bar_count = BAR_COUNT_MIN;
     if (display_bar_count > BAR_COUNT_MAX) display_bar_count = BAR_COUNT_MAX;
     int new_count = (int)(display_bar_count + 0.5f);
@@ -1006,20 +1031,10 @@ static void world_update(const vis_audio_t *audio) {
 
         for (int i = 0; i < obj_count; i++) {
             world_obj_t *o = &objects[i];
-            o->band_lo = (i * FFT_NUM_BANDS) / obj_count;
-            o->band_hi = ((i + 1) * FFT_NUM_BANDS) / obj_count - 1;
-            if (o->band_hi < o->band_lo) o->band_hi = o->band_lo;
-            if (o->band_hi >= FFT_NUM_BANDS) o->band_hi = FFT_NUM_BANDS - 1;
-
-            float t = (obj_count > 1) ? (float)i / (obj_count - 1) : 0.0f;
-            uint32_t new_color =
-                ((uint32_t)((uint8_t)((1.0f - t) * 255)) << 24) |
-                ((uint32_t)((uint8_t)(fm_sinf(t * T3D_PI) * 220)) << 16) |
-                ((uint32_t)((uint8_t)(t * 255)) << 8) | 0xFF;
-            if (new_color != o->color) {
-                o->color = new_color;
-                if (o->verts) update_bar_color(o);
-            }
+            uint32_t old_color = o->color;
+            assign_band_color(o, i, obj_count);
+            /* Update geometry only if color changed */
+            if (o->color != old_color && o->verts) update_bar_color(o);
         }
     }
 
