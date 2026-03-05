@@ -1069,8 +1069,10 @@ static void formation_set_targets(formation_t form) {
         int form_idx = ti[i];
         objects[bar_idx].tgt_x = raw_x[form_idx];
         objects[bar_idx].tgt_z = raw_z[form_idx];
-        /* Apply per-formation height scaling */
-        objects[bar_idx].max_height = BAR_MAX_HEIGHT * height_scale[form_idx];
+        /* Apply per-formation height scaling — defensive check against inf/nan */
+        float scale = height_scale[form_idx];
+        if (!isfinite(scale) || scale < 0.1f) scale = 1.0f;
+        objects[bar_idx].max_height = BAR_MAX_HEIGHT * scale;
         if (objects[bar_idx].max_height < BAR_MIN_HEIGHT * 2)
             objects[bar_idx].max_height = BAR_MIN_HEIGHT * 2;
     }
