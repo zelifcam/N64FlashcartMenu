@@ -476,7 +476,7 @@ void vis_session_frame (surface_t *display) {
 
     /* Build help block before rdpq_attach if needed */
     if (show_help && !help_block) {
-        int pw = 380, ph = 210;
+        int pw = 380, ph = 230;
         int px = DISPLAY_CENTER_X - pw / 2;
         int py = DISPLAY_CENTER_Y - ph / 2;
 
@@ -496,10 +496,11 @@ void vis_session_frame (surface_t *display) {
         rdpq_text_print(&cp, FNT_DEFAULT, px, ty +  44, BTN_CU " Prev Track  " BTN_CD " Next Track");
         rdpq_text_print(&cp, FNT_DEFAULT, px, ty +  64, BTN_CL " Rewind  " BTN_CR " Fast Forward");
         rdpq_text_print(&cp, FNT_DEFAULT, px, ty +  84, BTN_DL "  Prev Visualizer  " BTN_DR "  Next Visualizer");
-        rdpq_text_print(&cp, FNT_DEFAULT, px, ty + 104, BTN_R "  Toggle FPS");
-        rdpq_text_print(&cp, FNT_DEFAULT, px, ty + 124, BTN_L "  Track Info Banner");
-        rdpq_text_print(&cp, FNT_DEFAULT, px, ty + 144, BTN_B " / " BTN_Z "  Exit Visualizer");
-        rdpq_text_print(&cp, FNT_DEFAULT, px, ty + 164, BTN_START "  Hide This Menu");
+        rdpq_text_print(&cp, FNT_DEFAULT, px, ty + 104, BTN_DU "  More Bars  " BTN_DD "  Fewer Bars");
+        rdpq_text_print(&cp, FNT_DEFAULT, px, ty + 124, BTN_R "  Toggle FPS");
+        rdpq_text_print(&cp, FNT_DEFAULT, px, ty + 144, BTN_L "  Track Info Banner");
+        rdpq_text_print(&cp, FNT_DEFAULT, px, ty + 164, BTN_B " / " BTN_Z "  Exit Visualizer");
+        rdpq_text_print(&cp, FNT_DEFAULT, px, ty + 184, BTN_START "  Hide This Menu");
 
         help_block = rspq_block_end();
     }

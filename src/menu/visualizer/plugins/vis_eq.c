@@ -26,8 +26,13 @@
 #define BAR_MIN_HEIGHT   3.0f
 #define BAR_MAX_HEIGHT   130.0f
 
-/* One bar per FFT band — change FFT_NUM_BANDS in fft.h to scale both */
-#define NUM_BARS         FFT_NUM_BANDS
+/* Maximum bar count — compile-time array size.
+ * Active bar count is controlled at runtime via D-up/D-down (4–64, steps of 4). */
+#define NUM_BARS         64
+#define BAR_COUNT_MIN    4
+#define BAR_COUNT_MAX    64
+#define BAR_COUNT_STEP   4
+#define BAR_COUNT_DEFAULT 32
 
 /* Cylinder sides — fixed */
 #define BAR_SIDES        6
@@ -144,10 +149,18 @@ static formation_t form_current = FORM_LINE;
 static float       form_hold_remaining = 0.0f; /* seconds until we transition */
 static float       form_cam_scale = 1.0f;      /* smoothed camera radius scale: 1=full pullback, 0.45=tight */
 
-/* Starfield background */
-#define STAR_COUNT  120
+/* Dynamic bar count — D-up/D-down steps through 4,8,...,64 */
+static int   target_bar_count  = BAR_COUNT_DEFAULT;
+static float display_bar_count = BAR_COUNT_DEFAULT; /* smoothed, drives obj_count */
+
+/* Starfield background.
+ * Array always holds STAR_COUNT_MAX stars; active draw count scales inversely
+ * with bar count: 1 bar→128 stars, 64 bars→8 stars (linear interpolation). */
+#define STAR_COUNT_MAX  128
+#define STAR_COUNT_MIN  8
 typedef struct { float x, y, z, speed; } star_t;
-static star_t stars[STAR_COUNT];
+static star_t  stars[STAR_COUNT_MAX];
+static int     star_draw_count = STAR_COUNT_MAX; /* updated each frame from obj_count */
 
 /*===========================================================================
  * RNG (simple LCG — no stdlib rand dependency on N64)
@@ -526,7 +539,7 @@ static inline void set_vert(T3DVertPacked *verts, int vi,
 }
 
 /**
- * Build a prism with S sides — sides + top cap only (no bottom cap).
+ * Build a bar (S-sided cylinder) — sides + top cap only (no bottom cap).
  * The bottom faces the floor and is never visible from any camera angle
  * used by this visualizer, so omitting it saves S triangles per bar.
  *
@@ -540,7 +553,7 @@ static inline void set_vert(T3DVertPacked *verts, int vi,
  * Positions in unit space (radius=64, height 0->64).
  * Matrix scales to actual radius/height at draw time.
  */
-static bool build_prism(world_obj_t *obj) {
+static bool build_bar(world_obj_t *obj) {
     int S = obj->sides;
     /* S top ring + S bottom ring + 1 top cap centre (no bottom cap) */
     obj->vert_count = S * 2 + 1;
@@ -607,6 +620,44 @@ static bool build_prism(world_obj_t *obj) {
         obj->last_pz[f]     = 1e10f;
     }
     return true;
+}
+
+/* Rewrite vertex colors in an already-built bar buffer without rebuilding geometry.
+ * Called when obj->color changes so the spectrum shift is visible immediately. */
+static void update_bar_color(world_obj_t *obj) {
+    int S = obj->sides;
+    uint32_t col = obj->color;
+    uint8_t r = (col >> 24) & 0xFF;
+    uint8_t g = (col >> 16) & 0xFF;
+    uint8_t b = (col >>  8) & 0xFF;
+    uint32_t col_dark = ((uint32_t)(r * 35 / 100) << 24)
+                      | ((uint32_t)(g * 35 / 100) << 16)
+                      | ((uint32_t)(b * 35 / 100) <<  8)
+                      | 0xFF;
+
+    /* [0..S-1] top ring — full color */
+    for (int i = 0; i < S; i++) {
+        int idx = i / 2;
+        if (i % 2 == 0) obj->verts[idx].rgbaA = col;
+        else             obj->verts[idx].rgbaB = col;
+    }
+    /* [S..2S-1] bottom ring — darker shade */
+    for (int i = 0; i < S; i++) {
+        int vi  = S + i;
+        int idx = vi / 2;
+        if (vi % 2 == 0) obj->verts[idx].rgbaA = col_dark;
+        else              obj->verts[idx].rgbaB = col_dark;
+    }
+    /* [2S] top cap centre — full color */
+    {
+        int vi  = S * 2;
+        int idx = vi / 2;
+        if (vi % 2 == 0) obj->verts[idx].rgbaA = col;
+        else              obj->verts[idx].rgbaB = col;
+    }
+
+    int packed = (obj->vert_count + 1) / 2;
+    data_cache_hit_writeback(obj->verts, sizeof(T3DVertPacked) * packed);
 }
 
 static void draw_object(world_obj_t *obj) {
@@ -684,12 +735,17 @@ static void camera_update(float dt) {
     float h_norm = h_raw * h_raw * (3.0f - 2.0f * h_raw); /* smoothstep */
     h_norm = h_norm * h_norm;                               /* square again — heavy top bias */
 
-    /* Radius: two factors multiply together.
+    /* Radius: three factors multiply together.
      * 1) Height factor: pull in when overhead (28% at top, 100% at floor).
      * 2) Formation factor: full radius for line (needs wide view), 45% for
      *    compact shapes so they fill the frame instead of looking tiny.
-     * The two factors are independent and combine naturally. */
-    float r_height = WORLD_RADIUS * (1.0f - 0.72f * h_norm);
+     * 3) Bar count factor: line formation width grows linearly with obj_count,
+     *    so pull the camera back proportionally to keep all bars in frame.
+     *    Compact formations have fixed extents so no adjustment needed there. */
+    float bar_scale = (form_current == FORM_LINE)
+        ? (float)obj_count / (float)BAR_COUNT_DEFAULT
+        : 1.0f;
+    float r_height = WORLD_RADIUS * bar_scale * (1.0f - 0.72f * h_norm);
     float r_base   = r_height * form_cam_scale;
     float r = r_base * (1.0f + 0.07f * fm_sinf(cam_time * 0.11f));
 
@@ -728,7 +784,10 @@ static void world_roll(void) {
 
     free_objects();
 
-    obj_count = NUM_BARS;
+    /* Always allocate all NUM_BARS — active count is controlled at runtime */
+    obj_count          = BAR_COUNT_DEFAULT;
+    target_bar_count   = BAR_COUNT_DEFAULT;
+    display_bar_count  = BAR_COUNT_DEFAULT;
 
     for (int i = 0; i < NUM_BARS; i++) {
         world_obj_t *o = &objects[i];
@@ -743,23 +802,24 @@ static void world_roll(void) {
             o->last_pz[f]     = 1e10f;
         }
 
-        /* Band assignment: each bar covers an equal share of FFT bands */
-        o->band_lo = i * FFT_NUM_BANDS / NUM_BARS;
-        o->band_hi = (i + 1) * FFT_NUM_BANDS / NUM_BARS - 1;
+        /* Assign band range */
+        o->band_lo = (i * FFT_NUM_BANDS) / NUM_BARS;
+        o->band_hi = ((i + 1) * FFT_NUM_BANDS) / NUM_BARS - 1;
         if (o->band_hi < o->band_lo) o->band_hi = o->band_lo;
+        if (o->band_hi >= FFT_NUM_BANDS) o->band_hi = FFT_NUM_BANDS - 1;
 
-        /* Spectrum color: bass=red, mid=green, treble=cyan->blue */
-        float t  = (float)i / (NUM_BARS - 1);
-        uint8_t r = (uint8_t)((1.0f - t) * 255);
-        uint8_t g = (uint8_t)(fm_sinf(t * T3D_PI) * 220);
-        uint8_t b = (uint8_t)(t * 255);
-        o->color  = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | 0xFF;
+        /* Spectrum color: bass(red) → mid(green) → treble(blue), spread across all slots */
+        float ct = (NUM_BARS > 1) ? (float)i / (NUM_BARS - 1) : 0.0f;
+        uint8_t cr = (uint8_t)((1.0f - ct) * 255);
+        uint8_t cg = (uint8_t)(fm_sinf(ct * T3D_PI) * 220);
+        uint8_t cb = (uint8_t)(ct * 255);
+        o->color = ((uint32_t)cr << 24) | ((uint32_t)cg << 16) | ((uint32_t)cb << 8) | 0xFF;
 
-        formation_pos(FORM_LINE, i, NUM_BARS, &o->pos_x, &o->pos_z);
+        formation_pos(FORM_LINE, i, BAR_COUNT_DEFAULT, &o->pos_x, &o->pos_z);
         o->tgt_x = o->pos_x;
         o->tgt_z = o->pos_z;
 
-        build_prism(o);
+        build_bar(o);
     }
 
     /* Start in line formation, hold for a good while */
@@ -780,25 +840,24 @@ static void world_roll(void) {
 #define VIS_CY (VIS_H * 0.5f)
 
 static void starfield_init(void) {
-    for (int i = 0; i < STAR_COUNT; i++) {
+    for (int i = 0; i < STAR_COUNT_MAX; i++) {
         stars[i].x     = (float)(rng_next() % (int)VIS_W) - VIS_CX;
         stars[i].y     = (float)(rng_next() % (int)VIS_H) - VIS_CY;
         stars[i].z     = (float)(rng_next() % 500) + 100.0f;
-        stars[i].speed = 12.0f + (float)(rng_next() % 18);   /* 12-30, slow drift */
+        stars[i].speed = 12.0f + (float)(rng_next() % 18);
     }
+    star_draw_count = STAR_COUNT_MAX;
 }
 
 static void starfield_update(float dt, float bass) {
-    /* Speed is constant and slow — smooth, dreamlike drift.
-     * bass has no effect on speed; only brightness responds to music. */
     (void)bass;
-    for (int i = 0; i < STAR_COUNT; i++) {
+    for (int i = 0; i < star_draw_count; i++) {
         stars[i].z -= stars[i].speed * dt;
         if (stars[i].z < 1.0f) {
             stars[i].x     = (float)(rng_next() % (int)VIS_W) - VIS_CX;
             stars[i].y     = (float)(rng_next() % (int)VIS_H) - VIS_CY;
             stars[i].z     = 500.0f + (float)(rng_next() % 100);
-            stars[i].speed = 12.0f + (float)(rng_next() % 18);  /* 12-30, slow */
+            stars[i].speed = 12.0f + (float)(rng_next() % 18);
         }
     }
 }
@@ -808,9 +867,6 @@ static void starfield_draw(float bass) {
     rdpq_set_mode_standard();
     rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
 
-    /* Brightness responds to music via the ultra-smoothed bass value.
-     * Speed is fixed so stars glide smoothly; only their glow pulses gently.
-     * Draw in 4 brightness buckets — 4 prim_color calls instead of 120. */
     float bass_scale = 0.55f + bass * 0.45f;
     for (int bucket = 3; bucket >= 0; bucket--) {
         float lo = bucket * 0.25f;
@@ -820,7 +876,7 @@ static void starfield_draw(float bass) {
         uint8_t c = (uint8_t)(255 * mid_bright);
         rdpq_set_prim_color(RGBA32(c, c, c, 255));
 
-        for (int i = 0; i < STAR_COUNT; i++) {
+        for (int i = 0; i < star_draw_count; i++) {
             float inv_z = 400.0f / stars[i].z;
             float sx = VIS_CX + stars[i].x * inv_z;
             float sy = VIS_CY + stars[i].y * inv_z;
@@ -869,24 +925,84 @@ static void world_update(const vis_audio_t *audio) {
     for (int i = 0; i < FFT_NUM_BANDS; i++)
         s_bands[i] = s_bands[i] * 0.5f + audio->bands[i] * 0.5f;
 
-    /* Update each object's height from its assigned band range */
+    /* D-up / D-down: step bar count through 4,8,...,64 */
+    joypad_buttons_t pressed;
+    pressed.raw = audio->buttons_pressed;
+    if (pressed.d_up && target_bar_count < BAR_COUNT_MAX)
+        target_bar_count += BAR_COUNT_STEP;
+    if (pressed.d_down && target_bar_count > BAR_COUNT_MIN)
+        target_bar_count -= BAR_COUNT_STEP;
+
+    /* Smoothly lerp display_bar_count toward target (~6 bars/sec) */
+    float bar_diff = (float)target_bar_count - display_bar_count;
+    display_bar_count += bar_diff * (audio->dt * 6.0f);
+    if (display_bar_count < BAR_COUNT_MIN) display_bar_count = BAR_COUNT_MIN;
+    if (display_bar_count > BAR_COUNT_MAX) display_bar_count = BAR_COUNT_MAX;
+    int new_count = (int)(display_bar_count + 0.5f);
+    if (new_count < BAR_COUNT_MIN) new_count = BAR_COUNT_MIN;
+    if (new_count > BAR_COUNT_MAX) new_count = BAR_COUNT_MAX;
+
+    /* When active count changes, retarget formations to new layout */
+    if (new_count != obj_count) {
+        obj_count = new_count;
+        formation_set_targets(form_current);
+    }
+
+    /* Recompute band assignments and colors for all active bars.
+     * Each bar maps to band (i * FFT_NUM_BANDS / obj_count), wrapping modulo
+     * FFT_NUM_BANDS so bars beyond 32 reuse bands — looks like a denser spectrum. */
+    for (int i = 0; i < obj_count; i++) {
+        world_obj_t *o = &objects[i];
+        o->band_lo = (i * FFT_NUM_BANDS) / obj_count;
+        o->band_hi = ((i + 1) * FFT_NUM_BANDS) / obj_count - 1;
+        if (o->band_hi < o->band_lo) o->band_hi = o->band_lo;
+        if (o->band_hi >= FFT_NUM_BANDS) o->band_hi = FFT_NUM_BANDS - 1;
+
+        /* Spectrum color follows bar position within current active range */
+        float t = (obj_count > 1) ? (float)i / (obj_count - 1) : 0.0f;
+        uint8_t cr = (uint8_t)((1.0f - t) * 255);
+        uint8_t cg = (uint8_t)(fm_sinf(t * T3D_PI) * 220);
+        uint8_t cb = (uint8_t)(t * 255);
+        uint32_t new_color = ((uint32_t)cr << 24) | ((uint32_t)cg << 16) | ((uint32_t)cb << 8) | 0xFF;
+        if (new_color != o->color) {
+            o->color = new_color;
+            if (o->verts) update_bar_color(o);
+        }
+    }
+
+    /* Update active bars from their assigned band range */
+    float decay = 1.0f - 22.0f * audio->dt;
+    if (decay < 0.0f) decay = 0.0f;
+
     for (int i = 0; i < obj_count; i++) {
         world_obj_t *o = &objects[i];
 
-        /* Peak energy across this object's band range */
         float energy = 0.0f;
         for (int b = o->band_lo; b <= o->band_hi; b++) {
             if (s_bands[b] > energy) energy = s_bands[b];
         }
 
         float target = BAR_MIN_HEIGHT + energy * (o->max_height - BAR_MIN_HEIGHT);
-        /* Instant attack, fast exponential decay (~22x per second).
-         * Fast approximation: (1 - decay_rate*dt) clamped, accurate for small dt. */
-        float decay = 1.0f - 22.0f * audio->dt;
-        if (decay < 0.0f) decay = 0.0f;
+        /* Instant attack, fast exponential decay (~22x per second) */
         o->cur_height = (target > o->cur_height)
             ? target
             : (o->cur_height - target) * decay + target;
+    }
+
+    /* Star count scales inversely with bar count: more bars = fewer stars.
+     * Linear interpolation: 1 bar→128 stars, 64 bars→8 stars. */
+    {
+        float t = (float)(obj_count - 1) / (float)(BAR_COUNT_MAX - 1);
+        int sc = (int)(STAR_COUNT_MAX + t * (STAR_COUNT_MIN - STAR_COUNT_MAX) + 0.5f);
+        if (sc < STAR_COUNT_MIN) sc = STAR_COUNT_MIN;
+        if (sc > STAR_COUNT_MAX) sc = STAR_COUNT_MAX;
+        star_draw_count = sc;
+    }
+
+    /* Shrink inactive bars smoothly to the floor so they disappear gracefully */
+    for (int i = obj_count; i < NUM_BARS; i++) {
+        world_obj_t *o = &objects[i];
+        o->cur_height = o->cur_height * 0.85f + BAR_MIN_HEIGHT * 0.15f;
     }
 
     formation_update(audio->dt);
@@ -913,8 +1029,8 @@ static void world_render(const vis_audio_t *audio) {
     t3d_state_set_drawflags(T3D_FLAG_SHADED);
 
     /* Sort all bars back-to-front (painter's order) by distance from camera.
-     * No frustum culling — culling at varying camera angles caused more problems
-     * than it solved, and the insertion sort on NUM_BARS bars is still negligible. */
+     * Include inactive bars that are still shrinking (cur_height > floor + epsilon)
+     * so they animate out smoothly rather than popping off. */
     float fx = cam_target.v[0] - cam_eye.v[0];
     float fz = cam_target.v[2] - cam_eye.v[2];
     float flen2 = fx*fx + fz*fz;
@@ -924,7 +1040,9 @@ static void world_render(const vis_audio_t *audio) {
     float depths[NUM_BARS];
     int   draw_count = 0;
 
-    for (int i = 0; i < obj_count; i++) {
+    for (int i = 0; i < NUM_BARS; i++) {
+        /* Skip inactive bars that have fully settled to the floor */
+        if (i >= obj_count && objects[i].cur_height <= BAR_MIN_HEIGHT + 0.5f) continue;
         world_obj_t *o = &objects[i];
         float dx = o->pos_x - cam_eye.v[0];
         float dz = o->pos_z - cam_eye.v[2];
