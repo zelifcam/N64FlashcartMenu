@@ -652,7 +652,12 @@ static bool build_bar(world_obj_t *obj) {
 
     obj->verts  = malloc_uncached(sizeof(T3DVertPacked) * packed);
     obj->matrix = malloc_uncached(sizeof(T3DMat4FP) * FB_COUNT);
-    if (!obj->verts || !obj->matrix) return false;
+    if (!obj->verts || !obj->matrix) {
+        /* Clean up any partial allocation before returning failure */
+        if (obj->verts)  { free_uncached(obj->verts);  obj->verts = NULL; }
+        if (obj->matrix) { free_uncached(obj->matrix); obj->matrix = NULL; }
+        return false;
+    }
 
     uint32_t col = obj->color;
     /* Darker shade for bottom ring — gives a subtle gradient that grounds the bar */
@@ -909,7 +914,9 @@ static void world_roll(void) {
         o->tgt_x = o->pos_x;
         o->tgt_z = o->pos_z;
 
-        build_bar(o);
+        if (!build_bar(o)) {
+            debugf("[VIS_EQ] WARNING: bar %d geometry allocation failed (out of memory)\n", i);
+        }
     }
 
     /* Start in line formation, hold for a good while */

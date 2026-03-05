@@ -106,7 +106,7 @@ void fft_init (void) {
         /* Perceptual gain: exponential from 0.04 (bass) to 4.0 (treble).
          * Above 75% of bands the curve plateaus at 4.0 — high bands need
          * maximum boost to be visible at all. */
-        float t = (float)i / (FFT_NUM_BANDS - 1);
+        float t = (FFT_NUM_BANDS > 1) ? (float)i / (FFT_NUM_BANDS - 1) : 0.0f;
         float g = 0.04f * expf(t * logf(4.0f / 0.04f));
         if (g > 4.0f) g = 4.0f;
         band_gain[i] = g;
@@ -121,6 +121,9 @@ void fft_cleanup (void) {
 }
 
 void fft_process (int16_t *samples, int len, int channels) {
+    /* Guard against invalid inputs — corrupted audio data or misconfiguration */
+    if (!samples || channels <= 0 || len <= 0) return;
+
     int frames = len / channels;
     int step = frames / FFT_SIZE;
     if (step < 1) step = 1;
