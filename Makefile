@@ -110,6 +110,7 @@ SRCS = \
 	menu/visualizer/vis_quality.c \
 	menu/visualizer/visualizer.c \
 	menu/visualizer/vis_session.c \
+	menu/visualizer/plugins/vis_eq.c \
 	menu/views/startup.c \
 	menu/views/system_info.c \
 	menu/views/settings_editor.c \

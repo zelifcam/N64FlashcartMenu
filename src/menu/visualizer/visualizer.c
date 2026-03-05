@@ -31,49 +31,30 @@ void vis_init (void) {
     vis_quality_init();
 }
 
-void vis_register (const visualizer_t *vis) {
+static void vis_register (const visualizer_t *vis) {
     if (vis_count >= MAX_VISUALIZERS) return;
     visualizers[vis_count++] = vis;
     if (vis->init) vis->init();
 }
 
-int         vis_get_count   (void)        { return vis_count; }
-int         vis_get_current (void)        { return current_vis; }
-const char *vis_get_name    (int index)   {
-    if (index < 0 || index >= vis_count) return "Unknown";
-    return visualizers[index]->name;
-}
-bool        vis_is_transitioning (void)   { return transitioning; }
+int vis_get_count (void) { return vis_count; }
 
 void vis_next (void) {
     if (vis_count <= 1) return;
-    vis_switch_to((current_vis + 1) % vis_count);
-}
-
-void vis_prev (void) {
-    if (vis_count <= 1) return;
-    vis_switch_to((current_vis - 1 + vis_count) % vis_count);
-}
-
-void vis_switch_to (int index) {
-    if (index < 0 || index >= vis_count) return;
+    int index = (current_vis + 1) % vis_count;
     if (index == current_vis || transitioning) return;
     next_vis       = index;
     trans_progress = 0.0f;
     transitioning  = true;
 }
 
-void vis_set_start (int index) {
-    if (index >= 0 && index < vis_count) current_vis = index;
-}
-
-int vis_find_by_name (const char *name) {
-    if (!name) return -1;
-    for (int i = 0; i < vis_count; i++) {
-        if (visualizers[i]->name && strcmp(visualizers[i]->name, name) == 0)
-            return i;
-    }
-    return -1;
+void vis_prev (void) {
+    if (vis_count <= 1) return;
+    int index = (current_vis - 1 + vis_count) % vis_count;
+    if (index == current_vis || transitioning) return;
+    next_vis       = index;
+    trans_progress = 0.0f;
+    transitioning  = true;
 }
 
 void vis_update (const vis_audio_t *audio) {
@@ -102,7 +83,6 @@ void vis_update (const vis_audio_t *audio) {
 
 void vis_render (const vis_audio_t *audio) {
     if (vis_count == 0) return;
-    if (vis_quality_should_skip()) return;
 
     /* Always render the current visualizer */
     if (visualizers[current_vis]->render)
@@ -135,11 +115,17 @@ void vis_render (const vis_audio_t *audio) {
     }
 }
 
-/* --- Built-in visualizer registration ------------------------------------ */
+/* --- Auto-registration via linker section -------------------------------- */
 
-/* Forward declarations — add new visualizers here */
-/* extern const visualizer_t vis_bars; */
+/* These symbols bracket the vis_registry section.
+ * Declared as arrays (not scalars) to prevent MIPS GP-relative addressing. */
+extern const visualizer_t * const __start_vis_registry[];
+extern const visualizer_t * const __stop_vis_registry[];
 
 void vis_register_all (void) {
-    /* Visualizers will be registered here as they are implemented */
+    const visualizer_t * const *p = __start_vis_registry;
+    while (p < __stop_vis_registry) {
+        vis_register(*p);
+        p++;
+    }
 }

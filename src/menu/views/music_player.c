@@ -77,12 +77,12 @@ static void try_next_cover_source (void);
 static void cover_cache_blit_params (void) {
     int iw = cover_image->width;
     int ih = cover_image->height;
-    cover_s0 = (iw > ih) ? (iw - ih) / 2 : 0;  /* crop to square */
+    cover_s0 = (iw > ih) ? (iw - ih) / 2 : 0;
     cover_t0 = (ih > iw) ? (ih - iw) / 2 : 0;
     int text_bottom = VISIBLE_AREA_Y0 + 80;
     int bar_top     = SEEKBAR_Y - 8;
     int available   = bar_top - text_bottom;
-    cover_disp_size = available - 32;  /* 16px padding top and bottom */
+    cover_disp_size = available - 32;
     cover_dst_y = text_bottom + 16;
     cover_dst_x = DISPLAY_CENTER_X - (cover_disp_size / 2);
 }
@@ -174,14 +174,17 @@ static void try_next_cover_source (void) {
     }
 }
 
-static void load_cover_art (path_t *dir) {
+static void abort_cover_load (void) {
     if (cover_state == COVER_LOADING_JPEG) {
         jpeg_decoder_abort();
-        cover_state = COVER_IDLE;
     } else if (cover_state == COVER_LOADING_PNG) {
         png_decoder_abort();
-        cover_state = COVER_IDLE;
     }
+    cover_state = COVER_IDLE;
+}
+
+static void load_cover_art (path_t *dir) {
+    abort_cover_load();
     if (cover_image) {
         surface_free(cover_image);
         free(cover_image);
@@ -234,6 +237,7 @@ static bool try_skip_track (menu_t *menu, int direction) {
         seek_hold_ticks = 0;
         seek_inhibit = true;
         load_cover_art(menu->browser.directory);
+        if (vis_session_is_active()) vis_session_notify_track_changed(e->name);
         return true;
     }
     return false;
@@ -247,21 +251,12 @@ static void vis_skip_track (int direction) {
     if (current_menu) try_skip_track(current_menu, direction);
 }
 
+static void vis_seek_track (int seconds) {
+    mp3player_seek(seconds);
+}
+
 static void process (menu_t *menu) {
     mp3player_err_t err;
-
-    err = mp3player_process();
-    if (err != MP3PLAYER_OK) {
-        menu_show_error(menu, convert_error_message(err));
-        return;
-    }
-
-    /* Auto-advance to next track when current one finishes */
-    if (mp3player_is_finished() && !advance_failed) {
-        if (!try_skip_track(menu, 1)) {
-            advance_failed = true;
-        }
-    }
 
     joypad_buttons_t pressed = {0};
     JOYPAD_PORT_FOREACH (i) {
@@ -441,13 +436,12 @@ static void draw (menu_t *menu, surface_t *d) {
     rdpq_detach_show();
 }
 
+surface_t *music_player_get_cover_art (void) {
+    return cover_image;
+}
+
 static void deinit (void) {
-    if (cover_state == COVER_LOADING_JPEG) {
-        jpeg_decoder_abort();
-    } else if (cover_state == COVER_LOADING_PNG) {
-        png_decoder_abort();
-    }
-    cover_state = COVER_IDLE;
+    abort_cover_load();
     if (cover_image) {
         surface_free(cover_image);
         free(cover_image);
@@ -497,10 +491,20 @@ void view_music_player_init (menu_t *menu) {
     advance_failed = false;
     current_menu = menu;
     load_cover_art(menu->browser.directory);
-    vis_session_init(vis_toggle_playback, vis_skip_track);
+    vis_session_init(vis_toggle_playback, vis_skip_track, vis_seek_track, menu->browser.entry->name);
 }
 
 void view_music_player_display (menu_t *menu, surface_t *display) {
+    /* Always run the decoder and auto-advance regardless of visualizer state */
+    mp3player_err_t err = mp3player_process();
+    if (err != MP3PLAYER_OK) {
+        menu_show_error(menu, convert_error_message(err));
+    } else if (mp3player_is_finished() && !advance_failed) {
+        if (!try_skip_track(menu, 1)) {
+            advance_failed = true;
+        }
+    }
+
     if (vis_session_is_active()) {
         vis_session_set_paused(!mp3player_is_playing());
         vis_session_process();

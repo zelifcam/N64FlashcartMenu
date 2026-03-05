@@ -12,6 +12,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "fft.h"
 
 /*===========================================================================
  * Audio data passed to visualizers each frame
@@ -19,7 +20,7 @@
 
 typedef struct {
     float bass, mid, treb;           /* Smoothed frequency levels (0.0 – 1.0) */
-    float bands[16];                 /* Per-band spectrum (0.0 – 1.0) */
+    float bands[FFT_NUM_BANDS];      /* Per-band spectrum (0.0 – 1.0) */
     bool  beat;                      /* Beat detected this frame */
     float beat_intensity;            /* Beat strength (0.0 – 1.0) */
     int16_t *waveform;               /* Raw PCM samples (may be NULL) */
@@ -44,20 +45,25 @@ typedef struct {
 } visualizer_t;
 
 /*===========================================================================
+ * Auto-registration macro
+ *
+ * Place VIS_REGISTER(ptr) at file scope in any visualizer .c file.
+ * vis_register_all() will discover and register it automatically —
+ * no manual includes or registration calls needed.
+ *===========================================================================*/
+
+#define VIS_REGISTER(vis_ptr) \
+    __attribute__((used, section("vis_registry"))) \
+    static const visualizer_t * const _vis_entry_##vis_ptr = &(vis_ptr)
+
+/*===========================================================================
  * Framework API
  *===========================================================================*/
 
-void        vis_init(void);
-void        vis_register(const visualizer_t *vis);
-int         vis_get_count(void);
-int         vis_get_current(void);
-const char *vis_get_name(int index);
-void        vis_next(void);
-void        vis_prev(void);
-void        vis_switch_to(int index);
-void        vis_set_start(int index);
-int         vis_find_by_name(const char *name);
-bool        vis_is_transitioning(void);
+void vis_init(void);
+int  vis_get_count(void);
+void vis_next(void);
+void vis_prev(void);
 
 /**
  * @brief Update framework state — call once per frame.

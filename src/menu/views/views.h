@@ -124,6 +124,9 @@ void view_music_player_init(menu_t *menu);
  */
 void view_music_player_display(menu_t *menu, surface_t *display);
 
+/** @brief Returns the currently decoded cover art surface, or NULL if none. */
+surface_t *music_player_get_cover_art(void);
+
 /**
  * @brief Initialize the credits view.
  *

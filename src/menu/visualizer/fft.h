@@ -21,7 +21,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define FFT_NUM_BANDS 16
+#define FFT_NUM_BANDS 32
 
 void fft_init(void);
 void fft_cleanup(void);
@@ -37,7 +37,7 @@ void fft_process(int16_t *samples, int len, int channels);
 /** @brief Get smoothed bass/mid/high energy levels (0.0 – 1.0). */
 void fft_get_levels(float *bass, float *mid, float *high);
 
-/** @brief Get all 16 band values into caller-supplied array. */
+/** @brief Get all FFT_NUM_BANDS band values into caller-supplied array. */
 void fft_get_bands(float *bands);
 
 /** @brief Get beat detection state for this frame. */

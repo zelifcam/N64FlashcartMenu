@@ -370,7 +370,7 @@
  *   BTN_A ": Load\n" BTN_B ": Back"
  *
  * Colors match the physical N64 controller buttons:
- *   A = blue, B = green, Start = red, R/L/Z = gray, C = yellow
+ *   A = blue, B = green, Start = red, R/L/Z = gray, C = yellow, D-pad = gray
  */
 #define BTN_A       "^02Ⓐ^00"
 #define BTN_B       "^01Ⓑ^00"
@@ -382,5 +382,9 @@
 #define BTN_CD      "^03▼^00"
 #define BTN_CL      "^03◀^00"
 #define BTN_CR      "^03▶^00"
+#define BTN_DU      "^06▲^00"
+#define BTN_DD      "^06▼^00"
+#define BTN_DL      "^06◀^00"
+#define BTN_DR      "^06▶^00"
 
 #endif /* COMPONENTS_CONSTANTS_H__ */
