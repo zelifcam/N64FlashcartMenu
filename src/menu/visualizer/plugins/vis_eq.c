@@ -66,6 +66,11 @@
 /* Double-line: two rows, bars distributed evenly (uses total/2 at runtime) */
 #define DLINE_ROW_OFFSET 20.0f          /* Z offset from centre for each row */
 
+/* New formations: hexgrid and scatter hash constants */
+#define HEXGRID_SPACING  22.0f
+#define SCATTER_SEED_A   2246822519u
+#define SCATTER_SEED_B   2654435761u
+
 
 /*===========================================================================
  * Types
@@ -96,7 +101,62 @@ typedef enum {
     FORM_ELLIPSE     = 21,
     FORM_BUTTERFLY   = 22,
     FORM_GRID_SQUARE = 23,
-    FORM_COUNT       = 24,
+
+    /* Geometric polygons */
+    FORM_HEXAGON     = 24,
+    FORM_HEPTAGON    = 25,
+    FORM_OCTAGON     = 26,
+
+    /* Mathematical curves */
+    FORM_CARDIOID    = 27,
+    FORM_RHODONEA    = 28,
+    FORM_EPICYCLOID  = 29,
+    FORM_LIMACON     = 30,
+    FORM_LEMNISCATE  = 31,
+
+    /* Multi-shape */
+    FORM_CROSS       = 32,
+    FORM_X_SHAPE     = 33,
+    FORM_TRIPLERING  = 34,
+    FORM_DOUBLESPIRAL = 35,
+    FORM_HEXGRID     = 36,
+
+    /* Screen-filling scatter / organic */
+    FORM_SCATTER     = 37,
+    FORM_SCATTER_WIDE = 38,
+    FORM_CLOUD       = 39,
+    FORM_GALAXY      = 40,
+    FORM_FIBONACCI   = 41,
+
+    /* Height-creative */
+    FORM_MOUNTAIN    = 42,
+    FORM_AMPHITHEATER = 43,
+    FORM_FUNNEL      = 44,
+
+    /* Organic / rhythmic */
+    FORM_COMET       = 45,
+    FORM_VORTEX      = 46,
+    FORM_SUNBURST    = 47,
+    FORM_RIPPLE      = 48,
+
+    /* Line / curve variants */
+    FORM_DIAGONAL    = 49,
+    FORM_PARABOLA    = 50,
+    FORM_TRIPLEWAVE  = 51,
+    FORM_HEARTBEAT   = 52,
+
+    /* Free / chaotic */
+    FORM_SCATTER_RING = 53,
+    FORM_CLUSTERS    = 54,
+    FORM_FREE_FIELD  = 55,
+
+    /* Multi-element */
+    FORM_CHAINLINK   = 56,
+    FORM_ORBIT       = 57,
+    FORM_BOWTIE      = 58,
+    FORM_SPIRO       = 59,
+
+    FORM_COUNT       = 60,
 } formation_t;
 
 /* Number of framebuffers — must match display_init() call in menu.c */
@@ -149,10 +209,12 @@ static float   overhead_blend  = 0.0f;  /* 0=orbit, 1=straight-down overhead */
 static float   overhead_timer  = 0.0f;  /* accumulates; triggers overhead window */
 static float   overhead_period = 55.0f; /* randomised each cycle (45–75 s) */
 #define OVERHEAD_HOLD  8.0f             /* seconds to hold the overhead view */
+static uint32_t form_seed = 0;          /* re-randomized on each formation transition */
 
 /* Formation state machine */
 static formation_t form_current = FORM_LINE;
 static float       form_hold_remaining = 0.0f; /* seconds until we transition */
+static float       form_morph_time = 0.0f;     /* elapsed time since formation changed — hold waits for morph to complete */
 static float       form_cam_scale = 1.0f;      /* smoothed camera radius scale: 1=full pullback, 0.45=tight */
 
 /* Dynamic bar count — D-up/D-down steps through 4,8,...,64 */
@@ -215,8 +277,28 @@ static void assign_band_color(world_obj_t *o, int i, int n) {
 
 /* Compute (x, z) world position for bar i in the given formation.
  * `total` is the current active bar count — all layout math scales from it. */
-static void formation_pos(formation_t form, int i, int total, float *out_x, float *out_z) {
+/* Deterministic hash helpers for scatter formations */
+static inline uint32_t bar_hash(uint32_t s, int idx) {
+    uint32_t h = (s ^ (uint32_t)idx) * SCATTER_SEED_B;
+    h ^= h >> 16;
+    h *= SCATTER_SEED_A;
+    h ^= h >> 16;
+    return h;
+}
+static inline float hash_f(uint32_t s, int idx, int lane) {
+    uint32_t h = bar_hash(s ^ (uint32_t)(lane * 1234567), idx);
+    return ((float)(h >> 1) / (float)0x7FFFFFFFu) - 1.0f;
+}
+
+/* Compute (x, z) world position for bar i in the given formation.
+ * `total` is the current active bar count — all layout math scales from it. */
+static void formation_pos(formation_t form, int i, int total, uint32_t seed,
+                          float *out_x, float *out_z, float *out_height_scale) {
     if (total < 1) total = 1;
+    *out_x = 0.0f;
+    *out_z = 0.0f;
+    *out_height_scale = 1.0f;
+
     switch (form) {
         case FORM_LINE: {
             float total_width = (total - 1) * BAR_SPACING;
@@ -478,10 +560,402 @@ static void formation_pos(formation_t form, int i, int total, float *out_x, floa
             *out_z = -(cols - 1) * spacing * 0.5f + row * spacing;
             break;
         }
+        case FORM_HEXAGON: {
+            int bps = (total < 6) ? 1 : total / 6;
+            int side = i / bps, pos = i % bps;
+            float r = 95.0f;
+            float a0 = side * T3D_PI / 3.0f;
+            float a1 = (side + 1) * T3D_PI / 3.0f;
+            float t = (bps > 1) ? (float)pos / bps : 0.5f;
+            *out_x = (fm_cosf(a0) * (1.0f - t) + fm_cosf(a1) * t) * r;
+            *out_z = (fm_sinf(a0) * (1.0f - t) + fm_sinf(a1) * t) * r;
+            break;
+        }
+        case FORM_HEPTAGON: {
+            int bps = (total < 7) ? 1 : total / 7;
+            int side = i / bps, pos = i % bps;
+            float r = 95.0f;
+            float a0 = side * 2.0f * T3D_PI / 7.0f;
+            float a1 = (side + 1) * 2.0f * T3D_PI / 7.0f;
+            float t = (bps > 1) ? (float)pos / bps : 0.5f;
+            *out_x = (fm_cosf(a0) * (1.0f - t) + fm_cosf(a1) * t) * r;
+            *out_z = (fm_sinf(a0) * (1.0f - t) + fm_sinf(a1) * t) * r;
+            break;
+        }
+        case FORM_OCTAGON: {
+            int bps = (total < 8) ? 1 : total / 8;
+            int side = i / bps, pos = i % bps;
+            float r = 95.0f;
+            float a0 = side * T3D_PI / 4.0f;
+            float a1 = (side + 1) * T3D_PI / 4.0f;
+            float t = (bps > 1) ? (float)pos / bps : 0.5f;
+            *out_x = (fm_cosf(a0) * (1.0f - t) + fm_cosf(a1) * t) * r;
+            *out_z = (fm_sinf(a0) * (1.0f - t) + fm_sinf(a1) * t) * r;
+            break;
+        }
+        case FORM_CARDIOID: {
+            float theta = (float)i / total * 2.0f * T3D_PI;
+            float r = 60.0f * (1.0f + fm_cosf(theta));
+            *out_x = r * fm_cosf(theta);
+            *out_z = r * fm_sinf(theta);
+            break;
+        }
+        case FORM_RHODONEA: {
+            float theta = (float)i / total * 4.0f * T3D_PI;
+            float r = fabsf(fm_cosf(2.5f * theta)) * 100.0f;
+            *out_x = r * fm_cosf(theta);
+            *out_z = r * fm_sinf(theta);
+            break;
+        }
+        case FORM_EPICYCLOID: {
+            float theta = (float)i / total * 2.0f * T3D_PI;
+            float R = 40.0f, r2 = R / 3.0f;
+            float k = R / r2 - 1.0f;
+            *out_x = ((R - r2) * fm_cosf(theta) + r2 * fm_cosf(k * theta)) * 2.5f;
+            *out_z = ((R - r2) * fm_sinf(theta) - r2 * fm_sinf(k * theta)) * 2.5f;
+            break;
+        }
+        case FORM_LIMACON: {
+            float theta = (float)i / total * 2.0f * T3D_PI;
+            float r = 60.0f + 40.0f * fm_cosf(theta);
+            *out_x = r * fm_cosf(theta);
+            *out_z = r * fm_sinf(theta);
+            break;
+        }
+        case FORM_LEMNISCATE: {
+            int half = total / 2;
+            float frac = (i < half) ? (float)i / (half > 1 ? half : 1) : (float)(i - half) / (total - half > 1 ? total - half : 1);
+            float theta = (i < half)
+                ? (-T3D_PI / 4.0f + frac * T3D_PI / 2.0f)
+                : (3.0f * T3D_PI / 4.0f + frac * T3D_PI / 2.0f);
+            float cos2t = fm_cosf(2.0f * theta);
+            float r = (cos2t > 0.0f) ? sqrtf(110.0f * 110.0f * cos2t) : 0.0f;
+            *out_x = r * fm_cosf(theta);
+            *out_z = r * fm_sinf(theta);
+            break;
+        }
+        case FORM_CROSS: {
+            int half = total / 2;
+            float arm_len = 120.0f;
+            if (i < half) {
+                float t = (half > 1) ? (float)i / (half - 1) : 0.5f;
+                *out_x = -arm_len + t * 2.0f * arm_len;
+                *out_z = 0.0f;
+            } else {
+                int j = i - half, n2 = total - half;
+                float t = (n2 > 1) ? (float)j / (n2 - 1) : 0.5f;
+                *out_x = 0.0f;
+                *out_z = -arm_len + t * 2.0f * arm_len;
+            }
+            break;
+        }
+        case FORM_X_SHAPE: {
+            int half = total / 2;
+            float arm_len2 = 90.0f;
+            float scale = arm_len2 / 1.414f;
+            if (i < half) {
+                float t = (half > 1) ? (float)i / (half - 1) : 0.5f;
+                *out_x = -scale + t * 2.0f * scale;
+                *out_z = *out_x;
+            } else {
+                int j = i - half, n2 = total - half;
+                float t = (n2 > 1) ? (float)j / (n2 - 1) : 0.5f;
+                *out_x = -scale + t * 2.0f * scale;
+                *out_z = -(*out_x);
+            }
+            break;
+        }
+        case FORM_TRIPLERING: {
+            int third = total / 3;
+            float radii[3] = {40.0f, 75.0f, 110.0f};
+            int ring = (i < third) ? 0 : (i < 2 * third) ? 1 : 2;
+            int ring_start = ring * third;
+            int ring_total = (ring == 2) ? (total - 2 * third) : third;
+            int ring_i = i - ring_start;
+            float a = (ring_total > 0) ? (float)ring_i / ring_total * 2.0f * T3D_PI : 0.0f;
+            *out_x = fm_cosf(a) * radii[ring];
+            *out_z = fm_sinf(a) * radii[ring];
+            break;
+        }
+        case FORM_DOUBLESPIRAL: {
+            int strand = i % 2, idx = i / 2;
+            int pairs = total / 2;
+            float t = (pairs > 1) ? (float)idx / (pairs - 1) : 0.5f;
+            float phase = strand * T3D_PI;
+            float a = t * 3.0f * T3D_PI + phase;
+            float r = 20.0f + t * 90.0f;
+            *out_x = fm_cosf(a) * r;
+            *out_z = fm_sinf(a) * r;
+            break;
+        }
+        case FORM_HEXGRID: {
+            float s = HEXGRID_SPACING;
+            float row_h = s * 0.866f;
+            int cols = (int)(200.0f / s) + 1;
+            int col = i % cols, row = i / cols;
+            float x_off = (row % 2) ? s * 0.5f : 0.0f;
+            *out_x = -cols * s * 0.5f + col * s + x_off;
+            *out_z = -3.0f * row_h + row * row_h;
+            break;
+        }
+        case FORM_SCATTER: {
+            float fx = hash_f(seed, i, 0) * 130.0f;
+            float fz = hash_f(seed, i, 1) * 130.0f;
+            float d = sqrtf(fx * fx + fz * fz);
+            if (d > 130.0f) { fx = fx / d * 130.0f; fz = fz / d * 130.0f; }
+            *out_x = fx; *out_z = fz;
+            break;
+        }
+        case FORM_SCATTER_WIDE: {
+            uint32_t h = bar_hash(seed, i);
+            float angle = (float)(h & 0xFFFF) / 65536.0f * 2.0f * T3D_PI;
+            float r = 70.0f + (float)((h >> 16) & 0xFFFF) / 65536.0f * 80.0f;
+            *out_x = fm_cosf(angle) * r;
+            *out_z = fm_sinf(angle) * r;
+            break;
+        }
+        case FORM_CLOUD: {
+            float fx = (hash_f(seed, i, 0) + hash_f(seed, i, 2)) * 0.5f * 90.0f;
+            float fz = (hash_f(seed, i, 1) + hash_f(seed, i, 3)) * 0.5f * 90.0f;
+            *out_x = fx; *out_z = fz;
+            break;
+        }
+        case FORM_GALAXY: {
+            int arm = i % 2, idx = i / 2;
+            int arm_count = total / 2;
+            float t = (arm_count > 1) ? (float)idx / (arm_count - 1) : 0.5f;
+            float phase = arm * T3D_PI;
+            float a = t * 4.0f * T3D_PI + phase;
+            float r = 5.0f + t * 105.0f + hash_f(seed ^ 0xDEAD, i, 4) * 10.0f;
+            *out_x = fm_cosf(a) * r;
+            *out_z = fm_sinf(a) * r;
+            break;
+        }
+        case FORM_FIBONACCI: {
+            float golden_angle = 2.399963f;
+            float t = sqrtf((float)i / total);
+            float r = t * 110.0f;
+            float a = (float)i * golden_angle;
+            *out_x = fm_cosf(a) * r;
+            *out_z = fm_sinf(a) * r;
+            break;
+        }
+        case FORM_MOUNTAIN: {
+            float total_w = (total - 1) * BAR_SPACING;
+            *out_x = -total_w * 0.5f + i * BAR_SPACING;
+            *out_z = 0.0f;
+            float t = (total > 1) ? (float)i / (total - 1) : 0.5f;
+            float dist = (2.0f * t - 1.0f);
+            *out_height_scale = 0.25f + 0.75f * (1.0f - dist * dist);
+            break;
+        }
+        case FORM_AMPHITHEATER: {
+            float a = (float)i / total * 2.0f * T3D_PI;
+            *out_x = fm_cosf(a) * 100.0f;
+            *out_z = fm_sinf(a) * 100.0f;
+            float h_t = (1.0f - fm_sinf(a)) * 0.5f;
+            *out_height_scale = 0.3f + h_t * 0.7f;
+            break;
+        }
+        case FORM_FUNNEL: {
+            int rings = 4;
+            int bpr = total / rings;
+            int ring = (rings > 1 && bpr > 0) ? (i / bpr) : 0;
+            if (ring >= rings) ring = rings - 1;
+            int ring_i = i - ring * bpr;
+            int ring_n = (ring == rings - 1) ? (total - ring * bpr) : bpr;
+            float radii_f[4] = {25.0f, 55.0f, 85.0f, 115.0f};
+            float h_scales[4] = {1.4f, 1.0f, 0.65f, 0.35f};
+            float r = radii_f[ring];
+            float hs = h_scales[ring];
+            float a = (ring_n > 0) ? (float)ring_i / ring_n * 2.0f * T3D_PI : 0.0f;
+            *out_x = fm_cosf(a) * r;
+            *out_z = fm_sinf(a) * r;
+            *out_height_scale = hs;
+            break;
+        }
+        case FORM_COMET: {
+            int head_count = total / 3;
+            if (i < head_count) {
+                float a = (float)i / head_count * 2.0f * T3D_PI;
+                float r = 25.0f * (float)i / head_count;
+                *out_x = 80.0f + fm_cosf(a) * r;
+                *out_z = fm_sinf(a) * r;
+            } else {
+                float t = (float)(i - head_count) / (total - head_count);
+                *out_x = 80.0f - t * 210.0f;
+                *out_z = hash_f(seed, i, 5) * (t * 40.0f);
+            }
+            break;
+        }
+        case FORM_VORTEX: {
+            float theta = (float)(total - 1 - i) / total * 3.0f * T3D_PI;
+            float r = 110.0f * expf(-0.18f * theta);
+            *out_x = fm_cosf(theta) * r;
+            *out_z = fm_sinf(theta) * r;
+            break;
+        }
+        case FORM_SUNBURST: {
+            int spokes = (total + 1) / 2;
+            int spoke = i / 2, spoke_pos = i % 2;
+            float a = (float)spoke / spokes * 2.0f * T3D_PI;
+            float r = (spoke_pos == 0) ? 110.0f : 50.0f;
+            *out_x = fm_cosf(a) * r;
+            *out_z = fm_sinf(a) * r;
+            *out_height_scale = (spoke_pos == 0) ? 0.7f : 1.2f;
+            break;
+        }
+        case FORM_RIPPLE: {
+            int rings = 4;
+            int bpr = total / rings;
+            int ring = (i / bpr < rings) ? i / bpr : rings - 1;
+            int ring_i = i - ring * bpr;
+            int ring_n = (ring == rings - 1) ? (total - ring * bpr) : bpr;
+            float radii[4] = {20.0f, 42.0f, 88.0f, 115.0f};
+            float h_scales[4] = {1.4f, 1.1f, 0.8f, 0.5f};
+            float r = radii[ring];
+            float a = (ring_n > 0) ? (float)ring_i / ring_n * 2.0f * T3D_PI : 0.0f;
+            *out_x = fm_cosf(a) * r;
+            *out_z = fm_sinf(a) * r;
+            *out_height_scale = h_scales[ring];
+            break;
+        }
+        case FORM_DIAGONAL: {
+            float half_len = 120.0f;
+            float t = (total > 1) ? (float)i / (total - 1) : 0.5f;
+            *out_x = -half_len + t * 2.0f * half_len;
+            *out_z = -half_len + t * 2.0f * half_len;
+            break;
+        }
+        case FORM_PARABOLA: {
+            float t = (total > 1) ? (float)i / (total - 1) : 0.5f;
+            float x = -120.0f + t * 240.0f;
+            *out_x = x;
+            *out_z = 0.006f * x * x - 30.0f;
+            break;
+        }
+        case FORM_TRIPLEWAVE: {
+            int wave_bars = total / 3;
+            int wave = (i / wave_bars < 3) ? i / wave_bars : 2;
+            int wi = i - wave * wave_bars;
+            int wn = (wave == 2) ? (total - 2 * wave_bars) : wave_bars;
+            float t = (wn > 1) ? (float)wi / (wn - 1) : 0.5f;
+            float x = -140.0f + t * 280.0f;
+            float z_offset = (wave == 0) ? -45.0f : (wave == 1) ? 0.0f : 45.0f;
+            float phase = wave * 2.0f * T3D_PI / 3.0f;
+            *out_x = x;
+            *out_z = z_offset + 30.0f * fm_sinf(t * 2.0f * T3D_PI * 2.0f + phase);
+            break;
+        }
+        case FORM_HEARTBEAT: {
+            float t = (total > 1) ? (float)i / (total - 1) : 0.5f;
+            float x = -150.0f + t * 300.0f;
+            float spike_z = -80.0f * expf(-x * x * 0.003f) - 30.0f * expf(-(x + 50.0f) * (x + 50.0f) * 0.02f);
+            *out_x = x;
+            *out_z = spike_z;
+            break;
+        }
+        case FORM_SCATTER_RING: {
+            float a = (float)i / total * 2.0f * T3D_PI;
+            float base_r = 85.0f;
+            float jitter = hash_f(seed, i, 6) * 30.0f;
+            float r = base_r + jitter;
+            *out_x = fm_cosf(a) * r;
+            *out_z = fm_sinf(a) * r;
+            break;
+        }
+        case FORM_CLUSTERS: {
+            int cluster = i % 4, ci = i / 4;
+            float cx[4] = {-70.0f, 70.0f, -70.0f, 70.0f};
+            float cz[4] = {-70.0f, -70.0f, 70.0f, 70.0f};
+            float angle_c = hash_f(seed ^ (uint32_t)cluster * 777, ci, 0) * T3D_PI;
+            float r_c = hash_f(seed ^ (uint32_t)cluster * 999, ci, 1) * 0.5f * 35.0f + 5.0f;
+            *out_x = cx[cluster] + fm_cosf(angle_c) * r_c;
+            *out_z = cz[cluster] + fm_sinf(angle_c) * r_c;
+            break;
+        }
+        case FORM_FREE_FIELD: {
+            *out_x = hash_f(seed, i, 0) * 140.0f;
+            *out_z = hash_f(seed, i, 1) * 140.0f;
+            break;
+        }
+        case FORM_CHAINLINK: {
+            int half = total / 2;
+            float r_cl = 80.0f, offset = 55.0f;
+            if (i < half) {
+                float a = (float)i / half * 2.0f * T3D_PI;
+                *out_x = -offset + fm_cosf(a) * r_cl;
+                *out_z = fm_sinf(a) * r_cl;
+            } else {
+                float a = (float)(i - half) / (total - half) * 2.0f * T3D_PI;
+                *out_x = offset + fm_cosf(a) * r_cl;
+                *out_z = fm_sinf(a) * r_cl;
+            }
+            break;
+        }
+        case FORM_ORBIT: {
+            int third_o = total / 3;
+            int orbit = (i < third_o) ? 0 : (i < 2 * third_o) ? 1 : 2;
+            int orbit_i = i - orbit * third_o;
+            int orbit_n = (orbit == 2) ? (total - 2 * third_o) : third_o;
+            float tilt = orbit * T3D_PI / 3.0f;
+            float a_o = (orbit_n > 0) ? (float)orbit_i / orbit_n * 2.0f * T3D_PI : 0.0f;
+            float ex = fm_cosf(a_o) * 110.0f;
+            float ez = fm_sinf(a_o) * 50.0f;
+            *out_x = ex * fm_cosf(tilt) - ez * fm_sinf(tilt);
+            *out_z = ex * fm_sinf(tilt) + ez * fm_cosf(tilt);
+            break;
+        }
+        case FORM_BOWTIE: {
+            int half_bt = total / 2;
+            float tri_r = 90.0f;
+            if (i < half_bt) {
+                float a_corners[3] = {T3D_PI, T3D_PI + 2.0f * T3D_PI / 3.0f, T3D_PI - 2.0f * T3D_PI / 3.0f};
+                int bps_bt = half_bt / 3;
+                int side_bt = (bps_bt > 0) ? (i / bps_bt) : 0;
+                if (side_bt >= 3) side_bt = 2;
+                int pos_bt = i - side_bt * bps_bt;
+                float t_bt = (bps_bt > 1) ? (float)pos_bt / bps_bt : 0.5f;
+                float x0 = fm_cosf(a_corners[side_bt]), z0 = fm_sinf(a_corners[side_bt]);
+                float x1 = fm_cosf(a_corners[(side_bt + 1) % 3]), z1 = fm_sinf(a_corners[(side_bt + 1) % 3]);
+                *out_x = (x0 * (1.0f - t_bt) + x1 * t_bt) * tri_r;
+                *out_z = (z0 * (1.0f - t_bt) + z1 * t_bt) * tri_r;
+            } else {
+                int j = i - half_bt;
+                float a_corners[3] = {0.0f, 2.0f * T3D_PI / 3.0f, -2.0f * T3D_PI / 3.0f};
+                int n_bt = total - half_bt;
+                int bps_bt = n_bt / 3;
+                int side_bt = (bps_bt > 0) ? (j / bps_bt) : 0;
+                if (side_bt >= 3) side_bt = 2;
+                int pos_bt = j - side_bt * bps_bt;
+                float t_bt = (bps_bt > 1) ? (float)pos_bt / bps_bt : 0.5f;
+                float x0 = fm_cosf(a_corners[side_bt]), z0 = fm_sinf(a_corners[side_bt]);
+                float x1 = fm_cosf(a_corners[(side_bt + 1) % 3]), z1 = fm_sinf(a_corners[(side_bt + 1) % 3]);
+                *out_x = (x0 * (1.0f - t_bt) + x1 * t_bt) * tri_r;
+                *out_z = (z0 * (1.0f - t_bt) + z1 * t_bt) * tri_r;
+            }
+            break;
+        }
+        case FORM_SPIRO: {
+            float R_s = 70.0f, r_s = 30.0f, d_s = 60.0f;
+            float theta = (float)i / total * 2.0f * T3D_PI * 3.0f;
+            *out_x = (R_s - r_s) * fm_cosf(theta) + d_s * fm_cosf((R_s - r_s) / r_s * theta);
+            *out_z = (R_s - r_s) * fm_sinf(theta) - d_s * fm_sinf((R_s - r_s) / r_s * theta);
+            break;
+        }
         default:
             *out_x = 0; *out_z = 0;
             break;
     }
+}
+
+/* Return true if a formation is screen-filling and needs wider camera pullback */
+static inline bool form_is_wide(formation_t f) {
+    return f == FORM_CROSS || f == FORM_X_SHAPE || f == FORM_DIAGONAL ||
+           f == FORM_PARABOLA || f == FORM_TRIPLEWAVE || f == FORM_HEARTBEAT ||
+           f == FORM_SCATTER_WIDE || f == FORM_FREE_FIELD || f == FORM_DOUBLESPIRAL ||
+           f == FORM_CHAINLINK || f == FORM_BOWTIE || f == FORM_COMET ||
+           f == FORM_DNA || f == FORM_ZIGZAG || f == FORM_WAVE || f == FORM_ARROW;
 }
 
 /* Pick the next formation.
@@ -526,11 +1000,35 @@ static formation_t formation_pick_next(void) {
  * move toward the left side of the target, never crossing a bar to their right.
  * Insertion sort is used because N ≤ 64 (one-time cost, ≤ 2048 comparisons).
  */
+
+/* Forward declaration for update_bar_color (defined later) */
+static void update_bar_color(world_obj_t *obj);
+
+/* For LINE formation: sort bars left-to-right and reassign colors to match visual position */
+static void line_sort_and_recolor(void) {
+    /* Sort bar indices by pos_x (left to right) */
+    int sorted_idx[NUM_BARS];
+    for (int i = 0; i < obj_count; i++) sorted_idx[i] = i;
+    for (int i = 1; i < obj_count; i++) {
+        int k = sorted_idx[i], j = i - 1;
+        while (j >= 0 && objects[sorted_idx[j]].pos_x > objects[k].pos_x)
+            { sorted_idx[j + 1] = sorted_idx[j]; j--; }
+        sorted_idx[j + 1] = k;
+    }
+    /* Reassign colors based on visual left-to-right order */
+    for (int visual_pos = 0; visual_pos < obj_count; visual_pos++) {
+        world_obj_t *o = &objects[sorted_idx[visual_pos]];
+        uint32_t old_color = o->color;
+        assign_band_color(o, visual_pos, obj_count);
+        if (o->color != old_color && o->verts) update_bar_color(o);
+    }
+}
+
 static void formation_set_targets(formation_t form) {
     /* Compute raw target positions in formation index order */
-    float raw_x[NUM_BARS], raw_z[NUM_BARS];
+    float raw_x[NUM_BARS], raw_z[NUM_BARS], height_scale[NUM_BARS];
     for (int i = 0; i < obj_count; i++)
-        formation_pos(form, i, obj_count, &raw_x[i], &raw_z[i]);
+        formation_pos(form, i, obj_count, form_seed, &raw_x[i], &raw_z[i], &height_scale[i]);
 
     /* Sort current bar indices by (pos_x, pos_z) */
     int ci[NUM_BARS];
@@ -557,8 +1055,14 @@ static void formation_set_targets(formation_t form) {
 
     /* Assign: bar at current rank i goes to target at rank i — no X crossings */
     for (int i = 0; i < obj_count; i++) {
-        objects[ci[i]].tgt_x = raw_x[ti[i]];
-        objects[ci[i]].tgt_z = raw_z[ti[i]];
+        int bar_idx = ci[i];
+        int form_idx = ti[i];
+        objects[bar_idx].tgt_x = raw_x[form_idx];
+        objects[bar_idx].tgt_z = raw_z[form_idx];
+        /* Apply per-formation height scaling */
+        objects[bar_idx].max_height = BAR_MAX_HEIGHT * height_scale[form_idx];
+        if (objects[bar_idx].max_height < BAR_MIN_HEIGHT * 2)
+            objects[bar_idx].max_height = BAR_MIN_HEIGHT * 2;
     }
 }
 
@@ -578,8 +1082,11 @@ static void formation_update(float dt) {
         o->pos_z += (o->tgt_z - o->pos_z) * alpha;
     }
 
-    /* Hold timer — count down, then pick a new formation */
-    form_hold_remaining -= dt;
+    /* Track morph time — hold timer only starts after morph completes (~15s) */
+    form_morph_time += dt;
+    if (form_morph_time >= 15.0f) {
+        form_hold_remaining -= dt;
+    }
 
     /* ~10s before transition, pick a new autonomous bar count target (for cinematic lead-in) */
     if (form_hold_remaining < 10.0f && !auto_bar_picked) {
@@ -595,21 +1102,27 @@ static void formation_update(float dt) {
     if (form_hold_remaining <= 0.0f) {
         formation_t next = formation_pick_next();
         form_current = next;
+        form_seed = rng_next();  /* randomize seed for scatter formations */
         formation_set_targets(next);
 
-        if (next == FORM_LINE)
+        /* For LINE formation, sort bars by position and reassign colors left-to-right */
+        if (next == FORM_LINE) {
+            line_sort_and_recolor();
             form_hold_remaining = rng_float(HOLD_LINE_MIN, HOLD_LINE_MAX);
-        else
+        } else {
             form_hold_remaining = rng_float(HOLD_OTHER_MIN, HOLD_OTHER_MAX);
+        }
 
-        /* Reset auto target picker for the next formation hold period */
+        /* Reset morph timer and auto target picker for the next formation */
+        form_morph_time = 0.0f;
         auto_bar_picked = false;
     }
 
-    /* Camera radius target: line needs full pullback (1.0), compact shapes
-     * stay much closer (0.45) so they fill the frame instead of looking tiny.
+    /* Camera radius target: line (1.0), compact (0.45), wide screen-filling (0.65).
      * Smooth lerp so transitions are gradual. */
-    float scale_target = (form_current == FORM_LINE) ? 1.0f : 0.45f;
+    float scale_target = (form_current == FORM_LINE) ? 1.0f
+                       : form_is_wide(form_current) ? 0.65f
+                       : 0.45f;
     form_cam_scale += (scale_target - form_cam_scale) * (dt * 0.4f);
 }
 
@@ -924,7 +1437,9 @@ static void world_roll(void) {
         /* Assign band range and spectrum color */
         assign_band_color(o, i, obj_count);
 
-        formation_pos(FORM_LINE, i, BAR_COUNT_DEFAULT, &o->pos_x, &o->pos_z);
+        float height_scale = 1.0f;
+        formation_pos(FORM_LINE, i, BAR_COUNT_DEFAULT, form_seed, &o->pos_x, &o->pos_z, &height_scale);
+        o->max_height = BAR_MAX_HEIGHT * height_scale;
         o->tgt_x = o->pos_x;
         o->tgt_z = o->pos_z;
 
@@ -1038,9 +1553,9 @@ static void world_update(const vis_audio_t *audio) {
     if (pressed.d_down && target_bar_count > BAR_COUNT_MIN)
         target_bar_count -= BAR_COUNT_STEP;
 
-    /* Smoothly lerp display_bar_count toward target (~1.5 bars/sec — autonomous drift is very slow) */
+    /* Smoothly lerp display_bar_count toward target (~0.15 bars/sec — very smooth, ~200s to add all 60 bars) */
     float bar_diff = (float)target_bar_count - display_bar_count;
-    display_bar_count += bar_diff * (audio->dt * 1.5f);
+    display_bar_count += bar_diff * (audio->dt * 0.15f);
     if (display_bar_count < BAR_COUNT_MIN) display_bar_count = BAR_COUNT_MIN;
     if (display_bar_count > BAR_COUNT_MAX) display_bar_count = BAR_COUNT_MAX;
     int new_count = (int)(display_bar_count + 0.5f);
@@ -1056,6 +1571,11 @@ static void world_update(const vis_audio_t *audio) {
             assign_band_color(o, i, obj_count);
             /* Update geometry only if color changed */
             if (o->color != old_color && o->verts) update_bar_color(o);
+        }
+
+        /* In LINE formation, re-sort bars by position to keep colors left-to-right */
+        if (form_current == FORM_LINE) {
+            line_sort_and_recolor();
         }
     }
 
@@ -1077,15 +1597,8 @@ static void world_update(const vis_audio_t *audio) {
             : (o->cur_height - target) * decay + target;
     }
 
-    /* Star count scales inversely with bar count: more bars = fewer stars.
-     * Linear interpolation: 1 bar→128 stars, 64 bars→8 stars. */
-    {
-        float t = (float)(obj_count - 1) / (float)(BAR_COUNT_MAX - 1);
-        int sc = (int)(STAR_COUNT_MAX + t * (STAR_COUNT_MIN - STAR_COUNT_MAX) + 0.5f);
-        if (sc < STAR_COUNT_MIN) sc = STAR_COUNT_MIN;
-        if (sc > STAR_COUNT_MAX) sc = STAR_COUNT_MAX;
-        star_draw_count = sc;
-    }
+    /* Fixed star count for consistent visual density */
+    star_draw_count = 48;
 
     /* Shrink inactive bars smoothly to the floor so they disappear gracefully */
     for (int i = obj_count; i < NUM_BARS; i++) {
