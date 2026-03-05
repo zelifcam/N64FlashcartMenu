@@ -1572,8 +1572,9 @@ static void world_update(const vis_audio_t *audio) {
     if (display_bar_count > BAR_COUNT_MAX) display_bar_count = BAR_COUNT_MAX;
     int new_count = (int)(display_bar_count + 0.5f);
 
-    /* When active count changes, retarget formations and reassign bands/colors */
-    if (new_count != obj_count) {
+    /* When active count changes, retarget formations and reassign bands/colors
+     * BUT: skip retargeting while still morphing to prevent jittery mid-morph target shifts */
+    if (new_count != obj_count && form_morph_time >= 15.0f) {
         obj_count = new_count;
         formation_set_targets(form_current);
 
