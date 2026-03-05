@@ -28,6 +28,23 @@ static kiss_fft_cpx    fft_out[FFT_SIZE / 2 + 1];
 static float hann_window[FFT_SIZE];
 
 /*
+ * Per-band running average for imm/avg ratio normalization (MilkDrop style).
+ * Tracks the medium-term energy level of each band so relative dynamics are
+ * preserved even on hyper-compressed material.
+ *
+ * Asymmetric update: fast rise so loud sections are tracked quickly, slow
+ * fall so quiet sections don't immediately pump the bars up.
+ *
+ * BAND_FLOOR prevents noise amplification in genuinely silent bands — a band
+ * with avg below the floor is treated as inactive rather than boosted to full.
+ */
+#define BAND_FLOOR      0.05f   /* minimum avg denominator — silent band floor   */
+#define BAND_AVG_RISE   0.30f   /* new-value weight when val > avg (fast, ~2 frames) */
+#define BAND_AVG_FALL   0.05f   /* new-value weight when val < avg (slow, ~14 frames) */
+
+static float band_avg[FFT_NUM_BANDS];
+
+/*
  * Logarithmically-spaced bin boundaries, computed once in fft_init().
  * band_bin_lo[i] and band_bin_hi[i] are the inclusive FFT bin range
  * for band i.  Each band spans an equal ratio of frequency (one semitone
@@ -71,6 +88,8 @@ void fft_init (void) {
     float log_max = logf(FREQ_MAX);
 
     for (int i = 0; i < FFT_NUM_BANDS; i++) {
+        band_avg[i] = BAND_FLOOR;
+
         float f_lo = expf(log_min + (log_max - log_min) * (float)i / FFT_NUM_BANDS);
         float f_hi = expf(log_min + (log_max - log_min) * (float)(i + 1) / FFT_NUM_BANDS);
 
@@ -146,6 +165,17 @@ void fft_process (int16_t *samples, int len, int channels) {
             sum += re * re + im * im;
         }
         float val = sum * (1.0f / count) * band_gain[i];
+
+        /* Asymmetric running average — fast rise, slow fall.
+         * Tracks the band's medium-term energy level so the ratio below
+         * reflects relative dynamics rather than absolute level. */
+        float alpha = (val > band_avg[i]) ? BAND_AVG_RISE : BAND_AVG_FALL;
+        band_avg[i] = band_avg[i] * (1.0f - alpha) + val * alpha;
+
+        /* Normalise by running average (imm/avg ratio, MilkDrop style).
+         * Floor prevents noise amplification in silent bands. */
+        float denom = (band_avg[i] > BAND_FLOOR) ? band_avg[i] : BAND_FLOOR;
+        val = val / denom;
         if (val > 1.0f) val = 1.0f;
 
         /* Instant attack, moderate decay */

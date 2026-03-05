@@ -107,7 +107,6 @@ SRCS = \
 	menu/views/load_rom.c \
 	menu/views/music_player.c \
 	menu/visualizer/fft.c \
-	menu/visualizer/vis_quality.c \
 	menu/visualizer/visualizer.c \
 	menu/visualizer/vis_session.c \
 	menu/visualizer/plugins/vis_eq.c \

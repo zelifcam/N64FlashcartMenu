@@ -38,7 +38,7 @@
 #define BAR_SIDES        6
 
 /* World */
-#define WORLD_RADIUS     260.0f         /* camera orbit radius reference */
+#define WORLD_RADIUS     420.0f         /* camera orbit radius reference */
 #define FLOOR_Y         -10.0f
 #define CEIL_Y           110.0f
 
@@ -134,18 +134,21 @@ static int          frame_idx  = 0;   /* cycles 0..FB_COUNT-1 each render */
 static T3DViewport  viewport;
 
 
+/* Smoothed audio — per-frame inputs to update functions */
+static float s_bands[FFT_NUM_BANDS] = {0};  /* per-band spectrum, light smoothing */
+static float s_star_bass = 0.0f;            /* ultra-slow bass drift for starfield */
+
 /* Camera — continuous orbit, no cuts */
 static T3DVec3 cam_eye;
 static T3DVec3 cam_target;
-static float   cam_angle    = 0.0f;   /* orbit angle, accumulates forever */
-static float   cam_time     = 0.0f;   /* absolute time for breathing */
-/* Smoothed audio */
-static float s_bass = 0, s_mid = 0, s_high = 0;
-static float s_bands[FFT_NUM_BANDS] = {0};
-/* Heavily smoothed bass for camera — only moves on sustained heavy bass */
-static float s_cam_bass = 0;
-/* Ultra-smoothed bass for starfield speed — very gradual drift, no jerk */
-static float s_star_bass = 0;
+static float   cam_angle = 0.0f;   /* orbit angle, accumulates forever */
+static float   cam_time  = 0.0f;   /* absolute time for height breathing */
+static float   cam_bass  = 0.0f;   /* phrase-level bass for orbit/look-at */
+static float   beat_kick = 0.0f;   /* decaying beat impulse → orbit speed pulse */
+static float   overhead_blend  = 0.0f;  /* 0=orbit, 1=straight-down overhead */
+static float   overhead_timer  = 0.0f;  /* accumulates; triggers overhead window */
+static float   overhead_period = 55.0f; /* randomised each cycle (45–75 s) */
+#define OVERHEAD_HOLD  8.0f             /* seconds to hold the overhead view */
 
 /* Formation state machine */
 static formation_t form_current = FORM_LINE;
@@ -302,9 +305,7 @@ static void formation_pos(formation_t form, int i, int total, float *out_x, floa
         }
         case FORM_FLOWER: {
             float t = (float)i / total * (2.0f * T3D_PI);
-            float r = fm_cosf(4.0f * t);
-            if (r < 0.0f) r = -r;
-            r *= 90.0f;
+            float r = fabsf(fm_cosf(4.0f * t)) * 90.0f;
             *out_x = fm_cosf(t) * r;
             *out_z = fm_sinf(t) * r;
             break;
@@ -438,9 +439,7 @@ static void formation_pos(formation_t form, int i, int total, float *out_x, floa
         }
         case FORM_BUTTERFLY: {
             float t = (float)i / total * (2.0f * T3D_PI);
-            float r = fm_cosf(2.0f * t);
-            if (r < 0.0f) r = -r;
-            r *= 90.0f;
+            float r = fabsf(fm_cosf(2.0f * t)) * 90.0f;
             *out_x = fm_cosf(t) * r;
             *out_z = fm_sinf(t) * r;
             break;
@@ -479,10 +478,53 @@ static formation_t formation_pick_next(void) {
     return candidates[(int)(rng_next() % (uint32_t)nc)];
 }
 
-/* Update formation targets for all active bars — call on formation transition */
+/*
+ * Optimal-transport assignment for formation transitions.
+ *
+ * Naive index matching (bar[i] → target[i]) causes visible crossing because
+ * the target formation's index order has no relation to the bars' current
+ * spatial order.  The monotone rearrangement theorem (1D optimal transport)
+ * gives the unique minimum-cost, non-crossing assignment: sort both the
+ * current positions and the target positions by the same key and match by rank.
+ *
+ * Sort key: X primary, Z tiebreak.  This guarantees no X-axis crossings
+ * during the linear morph — bars on the left of the current formation always
+ * move toward the left side of the target, never crossing a bar to their right.
+ * Insertion sort is used because N ≤ 64 (one-time cost, ≤ 2048 comparisons).
+ */
 static void formation_set_targets(formation_t form) {
+    /* Compute raw target positions in formation index order */
+    float raw_x[NUM_BARS], raw_z[NUM_BARS];
+    for (int i = 0; i < obj_count; i++)
+        formation_pos(form, i, obj_count, &raw_x[i], &raw_z[i]);
+
+    /* Sort current bar indices by (pos_x, pos_z) */
+    int ci[NUM_BARS];
+    for (int i = 0; i < obj_count; i++) ci[i] = i;
+    for (int i = 1; i < obj_count; i++) {
+        int k = ci[i], j = i - 1;
+        while (j >= 0 && (objects[ci[j]].pos_x > objects[k].pos_x ||
+                          (objects[ci[j]].pos_x == objects[k].pos_x &&
+                           objects[ci[j]].pos_z > objects[k].pos_z)))
+            { ci[j + 1] = ci[j]; j--; }
+        ci[j + 1] = k;
+    }
+
+    /* Sort target indices by (raw_x, raw_z) */
+    int ti[NUM_BARS];
+    for (int i = 0; i < obj_count; i++) ti[i] = i;
+    for (int i = 1; i < obj_count; i++) {
+        int k = ti[i], j = i - 1;
+        while (j >= 0 && (raw_x[ti[j]] > raw_x[k] ||
+                          (raw_x[ti[j]] == raw_x[k] && raw_z[ti[j]] > raw_z[k])))
+            { ti[j + 1] = ti[j]; j--; }
+        ti[j + 1] = k;
+    }
+
+    /* Assign: bar at current rank i goes to target at rank i — no X crossings */
     for (int i = 0; i < obj_count; i++) {
-        formation_pos(form, i, obj_count, &objects[i].tgt_x, &objects[i].tgt_z);
+        objects[ci[i]].tgt_x = raw_x[ti[i]];
+        objects[ci[i]].tgt_z = raw_z[ti[i]];
     }
 }
 
@@ -676,13 +718,12 @@ static void draw_object(world_obj_t *obj) {
     float lh = obj->last_height[frame_idx];
     float lpx = obj->last_px[frame_idx];
     float lpz = obj->last_pz[frame_idx];
-    bool height_changed = (lh < 0.0f ||
-        (obj->cur_height - lh) > 0.5f || (lh - obj->cur_height) > 0.5f);
+    bool height_changed = (lh < 0.0f || fabsf(obj->cur_height - lh) > 0.5f);
     float dist_to_tgt = (obj->tgt_x - obj->pos_x) * (obj->tgt_x - obj->pos_x)
                       + (obj->tgt_z - obj->pos_z) * (obj->tgt_z - obj->pos_z);
-    float pos_thresh = (dist_to_tgt > 25.0f) ? 0.5f : 2.0f;  /* 5 units dist = morph threshold */
-    bool pos_changed = ((obj->pos_x - lpx) > pos_thresh || (lpx - obj->pos_x) > pos_thresh ||
-                        (obj->pos_z - lpz) > pos_thresh || (lpz - obj->pos_z) > pos_thresh);
+    float pos_thresh = (dist_to_tgt > 25.0f) ? 0.5f : 2.0f;
+    bool pos_changed = (fabsf(obj->pos_x - lpx) > pos_thresh ||
+                        fabsf(obj->pos_z - lpz) > pos_thresh);
 
     if (height_changed || pos_changed) {
         float scale_xz = obj->radius / 64.0f;
@@ -712,60 +753,81 @@ static void draw_object(world_obj_t *obj) {
 static void camera_init(void) {
     cam_angle = rng_float(0.0f, 2.0f * T3D_PI);
     cam_time  = 0.0f;
+    cam_bass       = 0.0f;
+    beat_kick      = 0.0f;
+    overhead_blend = 0.0f;
+    overhead_timer = 0.0f;
+    overhead_period = 45.0f + rng_float(0.0f, 30.0f);
     cam_eye    = (T3DVec3){{ fm_cosf(cam_angle) * WORLD_RADIUS,
                              CEIL_Y * 0.5f,
                              fm_sinf(cam_angle) * WORLD_RADIUS }};
     cam_target = (T3DVec3){{0, BAR_MAX_HEIGHT * 0.4f, 0}};
 }
 
-static void camera_update(float dt) {
-    cam_time += dt;
+static void camera_update(const vis_audio_t *audio) {
+    cam_time += audio->dt;
 
-    /* Orbit speed: one circle every ~30s, nudged by sustained bass only */
-    float orbit_speed = 0.10f + s_cam_bass * 0.04f;
-    cam_angle += orbit_speed * dt;
+    /* Phrase-level bass smoothing for orbit and look-at */
+    cam_bass = cam_bass * 0.80f + audio->bass * 0.20f;
 
-    /* Height profile: two sines with incommensurate periods.
-     * Raw h_raw is mapped through a skew curve so the camera lingers near
-     * the top (~60% of time above midpoint) rather than clustering at mid. */
-    float slow = fm_sinf(cam_time * 0.0785f);   /* ~80s period */
-    float fast = fm_sinf(cam_time * 0.273f);    /* ~23s period */
-    /* Centre of oscillation at 0.72 — only dips low when both sines go negative
-     * simultaneously, which happens ~25% of the time.  Gives ~75% overhead. */
-    float h_raw = 0.72f + 0.20f * slow + 0.12f * fast;
+    /* Beat kick — instant set on each beat, ~15-frame exponential decay */
+    if (audio->beat && audio->beat_intensity > beat_kick)
+        beat_kick = audio->beat_intensity;
+    beat_kick *= 0.88f;
+
+    /* Overhead blend — driven by periodic timer and by fps < 18 */
+    float fps = (audio->dt > 0.001f) ? 1.0f / audio->dt : 18.0f;
+    overhead_timer += audio->dt;
+    float overhead_target = (fps < 18.0f ||
+                             overhead_timer > overhead_period - OVERHEAD_HOLD) ? 1.0f : 0.0f;
+    if (overhead_timer >= overhead_period) {
+        overhead_timer  = 0.0f;
+        overhead_period = 45.0f + rng_float(0.0f, 30.0f);
+    }
+    float blend_rate = (overhead_target > overhead_blend) ? 2.0f : 0.8f;
+    overhead_blend += (overhead_target - overhead_blend) * blend_rate * audio->dt;
+    if (overhead_blend < 0.0f) overhead_blend = 0.0f;
+    if (overhead_blend > 1.0f) overhead_blend = 1.0f;
+
+    /* Orbit — bass nudges base speed; beat kick adds a momentary spin pulse */
+    cam_angle += (0.10f + cam_bass * 0.08f + beat_kick * 0.04f) * audio->dt;
+
+    /* Height — two incommensurate sines keep the view always changing */
+    float h_raw = 0.72f
+        + 0.20f * fm_sinf(cam_time * 0.0785f)   /* ~80s period */
+        + 0.12f * fm_sinf(cam_time * 0.273f);   /* ~23s period */
     if (h_raw < 0.0f) h_raw = 0.0f;
     if (h_raw > 1.0f) h_raw = 1.0f;
     float h_norm = h_raw * h_raw * (3.0f - 2.0f * h_raw); /* smoothstep */
 
-    /* Radius: three factors multiply together.
-     * 1) Height factor: pull in when overhead (28% at top, 100% at floor).
-     * 2) Formation factor: full radius for line (needs wide view), 45% for
-     *    compact shapes so they fill the frame instead of looking tiny.
-     * 3) Bar count factor: line formation width grows linearly with obj_count,
-     *    so pull the camera back proportionally to keep all bars in frame.
-     *    Compact formations have fixed extents so no adjustment needed there. */
+    /* Orbit camera position */
     float bar_scale = (form_current == FORM_LINE)
-        ? (float)obj_count / (float)BAR_COUNT_DEFAULT
-        : 1.0f;
-    float r_height = WORLD_RADIUS * bar_scale * (1.0f - 0.72f * h_norm);
-    float r_base   = r_height * form_cam_scale;
-    float r = r_base * (1.0f + 0.07f * fm_sinf(cam_time * 0.11f));
+        ? (float)obj_count / (float)BAR_COUNT_DEFAULT : 1.0f;
+    float r = WORLD_RADIUS * bar_scale
+        * (1.0f - 0.35f * h_norm)
+        * form_cam_scale
+        * (1.0f + 0.07f * fm_sinf(cam_time * 0.11f));
 
-    /* Actual Y: floor level up to well above the tallest bar.
-     * Ceiling raised so overhead shot is truly top-down. */
-    float h_top = FLOOR_Y + BAR_MAX_HEIGHT * 2.8f;   /* ~270 units above floor */
-    float h = FLOOR_Y + (h_top - FLOOR_Y) * h_norm;
+    float orbit_x  = fm_cosf(cam_angle) * r;
+    float orbit_y  = FLOOR_Y + BAR_MAX_HEIGHT * 2.8f * h_norm;
+    float orbit_z  = fm_sinf(cam_angle) * r;
+    float orbit_ty = FLOOR_Y + BAR_MAX_HEIGHT * (0.5f - 0.5f * h_norm + cam_bass * 0.15f);
 
-    cam_eye.v[0] = fm_cosf(cam_angle) * r;
-    cam_eye.v[1] = h;
-    cam_eye.v[2] = fm_sinf(cam_angle) * r;
+    /* Overhead position — tiny lateral offset avoids degenerate up vector */
+    float ov_x  = 18.0f;
+    float ov_y  = FLOOR_Y + BAR_MAX_HEIGHT * 7.0f;
+    float ov_z  = 0.0f;
+    float ov_ty = FLOOR_Y;
 
-    /* Look-at: when low, aim at mid-bar height; when overhead, aim at floor
-     * centre so the shape is framed properly from above. */
-    float ty = FLOOR_Y + BAR_MAX_HEIGHT * (0.5f - 0.5f * h_norm + s_cam_bass * 0.15f);
-    cam_target.v[0] = 0.0f;
-    cam_target.v[1] = ty;
-    cam_target.v[2] = 0.0f;
+    /* Lerp orbit ↔ overhead */
+    float ob = overhead_blend;
+    cam_eye.v[0] = orbit_x  + (ov_x  - orbit_x)  * ob;
+    cam_eye.v[1] = orbit_y  + (ov_y  - orbit_y)  * ob;
+    cam_eye.v[2] = orbit_z  + (ov_z  - orbit_z)  * ob;
+
+    cam_target = (T3DVec3){{ 0.0f,
+        orbit_ty + (ov_ty - orbit_ty) * ob,
+        0.0f }};
 }
 
 /*===========================================================================
@@ -798,20 +860,16 @@ static void world_roll(void) {
         o->radius     = BAR_WIDTH;
         o->max_height = BAR_MAX_HEIGHT;
         o->cur_height = BAR_MIN_HEIGHT;
-        for (int f = 0; f < FB_COUNT; f++) {
-            o->last_height[f] = -1.0f;
-            o->last_px[f]     = 1e10f;
-            o->last_pz[f]     = 1e10f;
-        }
 
-        /* Assign band range */
-        o->band_lo = (i * FFT_NUM_BANDS) / NUM_BARS;
-        o->band_hi = ((i + 1) * FFT_NUM_BANDS) / NUM_BARS - 1;
+        /* Assign band range and color spread across active slots only */
+        int n = obj_count;
+        o->band_lo = (i * FFT_NUM_BANDS) / n;
+        o->band_hi = ((i + 1) * FFT_NUM_BANDS) / n - 1;
         if (o->band_hi < o->band_lo) o->band_hi = o->band_lo;
         if (o->band_hi >= FFT_NUM_BANDS) o->band_hi = FFT_NUM_BANDS - 1;
 
-        /* Spectrum color: bass(red) → mid(green) → treble(blue), spread across all slots */
-        float ct = (NUM_BARS > 1) ? (float)i / (NUM_BARS - 1) : 0.0f;
+        /* Spectrum color: bass(red) → mid(green) → treble(blue) */
+        float ct = (n > 1) ? (float)i / (n - 1) : 0.0f;
         uint8_t cr = (uint8_t)((1.0f - ct) * 255);
         uint8_t cg = (uint8_t)(fm_sinf(ct * T3D_PI) * 220);
         uint8_t cb = (uint8_t)(ct * 255);
@@ -914,15 +972,9 @@ static void world_cleanup(void) {
 }
 
 static void world_update(const vis_audio_t *audio) {
-    /* Smooth global levels */
-    s_bass = s_bass * 0.8f + audio->bass * 0.2f;
-    s_mid  = s_mid  * 0.8f + audio->mid  * 0.2f;
-    s_high = s_high * 0.8f + audio->treb * 0.2f;
-    /* Camera bass: very slow attack and decay — only reacts to prolonged heavy bass */
-    s_cam_bass = s_cam_bass * 0.97f + s_bass * 0.03f;
-    /* Star bass: even slower — barely drifts, no beat-sync jerk */
-    s_star_bass = s_star_bass * 0.995f + s_bass * 0.005f;
-    /* Light smoothing on bands — enough to avoid single-frame spikes, fast enough to feel live */
+    /* Star bass: ultra-slow drift, no beat-sync jerk */
+    s_star_bass = s_star_bass * 0.995f + audio->bass * 0.005f;
+    /* Per-band smoothing — fast enough to feel live, enough to kill single-frame spikes */
     for (int i = 0; i < FFT_NUM_BANDS; i++)
         s_bands[i] = s_bands[i] * 0.5f + audio->bands[i] * 0.5f;
 
@@ -940,34 +992,28 @@ static void world_update(const vis_audio_t *audio) {
     if (display_bar_count < BAR_COUNT_MIN) display_bar_count = BAR_COUNT_MIN;
     if (display_bar_count > BAR_COUNT_MAX) display_bar_count = BAR_COUNT_MAX;
     int new_count = (int)(display_bar_count + 0.5f);
-    if (new_count < BAR_COUNT_MIN) new_count = BAR_COUNT_MIN;
-    if (new_count > BAR_COUNT_MAX) new_count = BAR_COUNT_MAX;
 
-    /* When active count changes, retarget formations to new layout */
+    /* When active count changes, retarget formations and reassign bands/colors */
     if (new_count != obj_count) {
         obj_count = new_count;
         formation_set_targets(form_current);
-    }
 
-    /* Recompute band assignments and colors for all active bars.
-     * Each bar maps to band (i * FFT_NUM_BANDS / obj_count), wrapping modulo
-     * FFT_NUM_BANDS so bars beyond 32 reuse bands — looks like a denser spectrum. */
-    for (int i = 0; i < obj_count; i++) {
-        world_obj_t *o = &objects[i];
-        o->band_lo = (i * FFT_NUM_BANDS) / obj_count;
-        o->band_hi = ((i + 1) * FFT_NUM_BANDS) / obj_count - 1;
-        if (o->band_hi < o->band_lo) o->band_hi = o->band_lo;
-        if (o->band_hi >= FFT_NUM_BANDS) o->band_hi = FFT_NUM_BANDS - 1;
+        for (int i = 0; i < obj_count; i++) {
+            world_obj_t *o = &objects[i];
+            o->band_lo = (i * FFT_NUM_BANDS) / obj_count;
+            o->band_hi = ((i + 1) * FFT_NUM_BANDS) / obj_count - 1;
+            if (o->band_hi < o->band_lo) o->band_hi = o->band_lo;
+            if (o->band_hi >= FFT_NUM_BANDS) o->band_hi = FFT_NUM_BANDS - 1;
 
-        /* Spectrum color follows bar position within current active range */
-        float t = (obj_count > 1) ? (float)i / (obj_count - 1) : 0.0f;
-        uint8_t cr = (uint8_t)((1.0f - t) * 255);
-        uint8_t cg = (uint8_t)(fm_sinf(t * T3D_PI) * 220);
-        uint8_t cb = (uint8_t)(t * 255);
-        uint32_t new_color = ((uint32_t)cr << 24) | ((uint32_t)cg << 16) | ((uint32_t)cb << 8) | 0xFF;
-        if (new_color != o->color) {
-            o->color = new_color;
-            if (o->verts) update_bar_color(o);
+            float t = (obj_count > 1) ? (float)i / (obj_count - 1) : 0.0f;
+            uint32_t new_color =
+                ((uint32_t)((uint8_t)((1.0f - t) * 255)) << 24) |
+                ((uint32_t)((uint8_t)(fm_sinf(t * T3D_PI) * 220)) << 16) |
+                ((uint32_t)((uint8_t)(t * 255)) << 8) | 0xFF;
+            if (new_color != o->color) {
+                o->color = new_color;
+                if (o->verts) update_bar_color(o);
+            }
         }
     }
 
@@ -1007,7 +1053,7 @@ static void world_update(const vis_audio_t *audio) {
     }
 
     formation_update(audio->dt);
-    camera_update(audio->dt);
+    camera_update(audio);
     starfield_update(audio->dt);
 }
 
@@ -1045,7 +1091,7 @@ static void world_render(const vis_audio_t *audio) {
      * re-enters 3D mode for the bars on top. */
     starfield_draw(s_star_bass);
 
-    T3DVec3 up = {{0, 1, 0}};
+    T3DVec3 up = (overhead_blend > 0.5f) ? (T3DVec3){{1, 0, 0}} : (T3DVec3){{0, 1, 0}};
     t3d_viewport_look_at(&viewport, &cam_eye, &cam_target, &up);
     t3d_viewport_attach(&viewport);
 

@@ -15,7 +15,6 @@
 #include "vis_audio.h"
 #include "fft.h"
 #include "visualizer.h"
-#include "vis_quality.h"
 #include "../fonts.h"
 #include "../ui_components/constants.h"
 #include "../mp3_player.h"

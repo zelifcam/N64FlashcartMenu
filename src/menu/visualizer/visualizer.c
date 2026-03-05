@@ -10,7 +10,6 @@
 #include <string.h>
 #include <libdragon.h>
 #include "visualizer.h"
-#include "vis_quality.h"
 
 #define MAX_VISUALIZERS     32
 #define TRANSITION_TIME     0.3f    /* seconds for full dip-to-black */
@@ -28,7 +27,6 @@ void vis_init (void) {
     next_vis       = -1;
     trans_progress = 0.0f;
     transitioning  = false;
-    vis_quality_init();
 }
 
 static void vis_register (const visualizer_t *vis) {
@@ -59,7 +57,6 @@ void vis_prev (void) {
 
 void vis_update (const vis_audio_t *audio) {
     if (vis_count == 0) return;
-    vis_quality_update();
 
     if (visualizers[current_vis]->update)
         visualizers[current_vis]->update(audio);
