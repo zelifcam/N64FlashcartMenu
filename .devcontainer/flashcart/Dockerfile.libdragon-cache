@@ -1,0 +1,33 @@
+# Cached build image: extends n64menu-build with libdragon pre-built and installed.
+#
+# Build this image once (or when the libdragon submodule hash changes):
+#
+#   podman build -f .devcontainer/flashcart/Dockerfile.libdragon-cache \
+#     --build-arg LIBDRAGON_COMMIT=$(git submodule status libdragon | awk '{print $1}') \
+#     -t n64menu-libdragon .
+#
+# Then fast-build the project without rebuilding libdragon:
+#
+#   podman run --rm -e N64_INST=/opt/libdragon \
+#     -v "$(pwd):/work" -w /work n64menu-libdragon \
+#     bash -c "export PATH=/opt/libdragon/bin:\$PATH && make all -j"
+
+FROM n64menu-build
+
+ARG LIBDRAGON_COMMIT=unknown
+
+# Record the commit this image was built against (invalidates cache on submodule bump)
+LABEL libdragon.commit=${LIBDRAGON_COMMIT}
+
+ENV N64_INST=/opt/libdragon
+ENV PATH=/opt/libdragon/bin:$PATH
+
+# Copy libdragon source and build + install it into /opt/libdragon
+COPY libdragon /tmp/libdragon
+RUN cd /tmp/libdragon && \
+    make clobber -j && \
+    make libdragon -j && \
+    make install -j && \
+    make tools -j1 && \
+    make tools-install -j && \
+    rm -rf /tmp/libdragon

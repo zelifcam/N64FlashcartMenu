@@ -95,7 +95,8 @@ typedef enum {
     FORM_ZIGZAG      = 20,
     FORM_ELLIPSE     = 21,
     FORM_BUTTERFLY   = 22,
-    FORM_COUNT       = 23,
+    FORM_GRID_SQUARE = 23,
+    FORM_COUNT       = 24,
 } formation_t;
 
 /* Number of framebuffers — must match display_init() call in menu.c */
@@ -142,9 +143,8 @@ static float s_star_bass = 0.0f;            /* ultra-slow bass drift for starfie
 static T3DVec3 cam_eye;
 static T3DVec3 cam_target;
 static float   cam_angle = 0.0f;   /* orbit angle, accumulates forever */
-static float   cam_time  = 0.0f;   /* absolute time for height breathing */
-static float   cam_bass  = 0.0f;   /* phrase-level bass for orbit/look-at */
-static float   beat_kick = 0.0f;   /* decaying beat impulse → orbit speed pulse */
+static float   wall_time = 0.0f;   /* wall-clock time for height breathing (always advances) */
+static float   cam_bar_scale = 1.0f; /* smoothed bar scale — tracks FORM_LINE ratio */
 static float   overhead_blend  = 0.0f;  /* 0=orbit, 1=straight-down overhead */
 static float   overhead_timer  = 0.0f;  /* accumulates; triggers overhead window */
 static float   overhead_period = 55.0f; /* randomised each cycle (45–75 s) */
@@ -442,6 +442,17 @@ static void formation_pos(formation_t form, int i, int total, float *out_x, floa
             float r = fabsf(fm_cosf(2.0f * t)) * 90.0f;
             *out_x = fm_cosf(t) * r;
             *out_z = fm_sinf(t) * r;
+            break;
+        }
+        case FORM_GRID_SQUARE: {
+            /* Square grid: cols = rows = floor(sqrt(total)) */
+            int cols = 1;
+            while ((cols + 1) * (cols + 1) <= total) cols++;
+            if (cols < 1) cols = 1;
+            int col = i % cols, row = i / cols;
+            float spacing = 20.0f;
+            *out_x = -(cols - 1) * spacing * 0.5f + col * spacing;
+            *out_z = -(cols - 1) * spacing * 0.5f + row * spacing;
             break;
         }
         default:
@@ -752,9 +763,8 @@ static void draw_object(world_obj_t *obj) {
 
 static void camera_init(void) {
     cam_angle = rng_float(0.0f, 2.0f * T3D_PI);
-    cam_time  = 0.0f;
-    cam_bass       = 0.0f;
-    beat_kick      = 0.0f;
+    wall_time = 0.0f;
+    cam_bar_scale = 1.0f;
     overhead_blend = 0.0f;
     overhead_timer = 0.0f;
     overhead_period = 45.0f + rng_float(0.0f, 30.0f);
@@ -765,53 +775,49 @@ static void camera_init(void) {
 }
 
 static void camera_update(const vis_audio_t *audio) {
-    cam_time += audio->dt;
+    /* Use wall-clock frame time even when paused, so camera never stops */
+    float frame_dt = (audio->dt > 0.0001f) ? audio->dt : 0.05f;  /* fallback to 50ms */
+    wall_time += frame_dt;
 
-    /* Phrase-level bass smoothing for orbit and look-at */
-    cam_bass = cam_bass * 0.80f + audio->bass * 0.20f;
-
-    /* Beat kick — instant set on each beat, ~15-frame exponential decay */
-    if (audio->beat && audio->beat_intensity > beat_kick)
-        beat_kick = audio->beat_intensity;
-    beat_kick *= 0.88f;
-
-    /* Overhead blend — driven by periodic timer and by fps < 18 */
-    float fps = (audio->dt > 0.001f) ? 1.0f / audio->dt : 18.0f;
-    overhead_timer += audio->dt;
-    float overhead_target = (fps < 18.0f ||
+    /* Overhead blend — driven by periodic timer and fps < 15 (hysteresis: release at 19fps) */
+    float fps = (audio->dt > 0.001f) ? 1.0f / audio->dt : 20.0f;
+    overhead_timer += frame_dt;
+    bool perf_overhead = (overhead_blend > 0.5f) ? (fps < 19.0f) : (fps < 15.0f);
+    float overhead_target = (perf_overhead ||
                              overhead_timer > overhead_period - OVERHEAD_HOLD) ? 1.0f : 0.0f;
     if (overhead_timer >= overhead_period) {
         overhead_timer  = 0.0f;
         overhead_period = 45.0f + rng_float(0.0f, 30.0f);
     }
-    float blend_rate = (overhead_target > overhead_blend) ? 2.0f : 0.8f;
-    overhead_blend += (overhead_target - overhead_blend) * blend_rate * audio->dt;
+    float blend_rate = 0.0833f;  /* Same speed in both directions — ~12s at 20fps */
+    overhead_blend += (overhead_target - overhead_blend) * blend_rate * frame_dt;
     if (overhead_blend < 0.0f) overhead_blend = 0.0f;
     if (overhead_blend > 1.0f) overhead_blend = 1.0f;
 
-    /* Orbit — bass nudges base speed; beat kick adds a momentary spin pulse */
-    cam_angle += (0.10f + cam_bass * 0.08f + beat_kick * 0.04f) * audio->dt;
+    /* Orbit — constant speed, always advancing */
+    cam_angle += 0.10f * frame_dt;
 
     /* Height — two incommensurate sines keep the view always changing */
     float h_raw = 0.72f
-        + 0.20f * fm_sinf(cam_time * 0.0785f)   /* ~80s period */
-        + 0.12f * fm_sinf(cam_time * 0.273f);   /* ~23s period */
+        + 0.20f * fm_sinf(wall_time * 0.0785f)   /* ~80s period */
+        + 0.12f * fm_sinf(wall_time * 0.273f);   /* ~23s period */
     if (h_raw < 0.0f) h_raw = 0.0f;
     if (h_raw > 1.0f) h_raw = 1.0f;
     float h_norm = h_raw * h_raw * (3.0f - 2.0f * h_raw); /* smoothstep */
 
-    /* Orbit camera position */
-    float bar_scale = (form_current == FORM_LINE)
+    /* Orbit camera position — smooth bar scale to avoid snap on formation transitions */
+    float bar_scale_target = (form_current == FORM_LINE)
         ? (float)obj_count / (float)BAR_COUNT_DEFAULT : 1.0f;
-    float r = WORLD_RADIUS * bar_scale
+    cam_bar_scale += (bar_scale_target - cam_bar_scale) * 0.4f * frame_dt;
+    float r = WORLD_RADIUS * cam_bar_scale
         * (1.0f - 0.35f * h_norm)
         * form_cam_scale
-        * (1.0f + 0.07f * fm_sinf(cam_time * 0.11f));
+        * (1.0f + 0.07f * fm_sinf(wall_time * 0.11f));
 
     float orbit_x  = fm_cosf(cam_angle) * r;
     float orbit_y  = FLOOR_Y + BAR_MAX_HEIGHT * 2.8f * h_norm;
     float orbit_z  = fm_sinf(cam_angle) * r;
-    float orbit_ty = FLOOR_Y + BAR_MAX_HEIGHT * (0.5f - 0.5f * h_norm + cam_bass * 0.15f);
+    float orbit_ty = FLOOR_Y + BAR_MAX_HEIGHT * (0.5f - 0.5f * h_norm);
 
     /* Overhead position — tiny lateral offset avoids degenerate up vector */
     float ov_x  = 18.0f;
@@ -1018,8 +1024,7 @@ static void world_update(const vis_audio_t *audio) {
     }
 
     /* Update active bars from their assigned band range */
-    float decay = 1.0f - 22.0f * audio->dt;
-    if (decay < 0.0f) decay = 0.0f;
+    float decay = expf(-22.0f * audio->dt);  /* exponential decay — smooth at all frame rates */
 
     for (int i = 0; i < obj_count; i++) {
         world_obj_t *o = &objects[i];
@@ -1091,7 +1096,10 @@ static void world_render(const vis_audio_t *audio) {
      * re-enters 3D mode for the bars on top. */
     starfield_draw(s_star_bass);
 
-    T3DVec3 up = (overhead_blend > 0.5f) ? (T3DVec3){{1, 0, 0}} : (T3DVec3){{0, 1, 0}};
+    /* Smoothly rotate up vector from (0,1,0) → (1,0,0) as overhead_blend rises.
+     * angle sweeps 0 → π/2; result is always unit length, never degenerate. */
+    float up_angle = overhead_blend * T3D_PI * 0.5f;
+    T3DVec3 up = {{ fm_sinf(up_angle), fm_cosf(up_angle), 0.0f }};
     t3d_viewport_look_at(&viewport, &cam_eye, &cam_target, &up);
     t3d_viewport_attach(&viewport);
 
