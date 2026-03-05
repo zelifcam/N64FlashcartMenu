@@ -360,18 +360,10 @@ static void draw_banner (void) {
     int bw    = DISPLAY_WIDTH - OVERSCAN_WIDTH * 2;
     int thumb = bh - 16;                             /* 8px padding top + bottom */
 
-    uint8_t panel_a = (uint8_t)(160 * banner_alpha);
-
     const mp3_metadata_t *meta = mp3player_get_metadata();
 
-    /* Semi-transparent dark panel — full available width */
-    rdpq_set_mode_standard();
-    rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
-    rdpq_set_prim_color(RGBA32(0, 0, 0, panel_a));
-    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
-    rdpq_fill_rectangle(bx, by, bx + bw, by + bh);
-
-    uint8_t content_a = (uint8_t)(255 * banner_alpha);
+    /* Cover art and text fade with banner (20% transparent = 80% opacity) */
+    uint8_t content_a = (uint8_t)(255 * banner_alpha * 0.8f);
 
     /* Cover art thumbnail — blit pre-scaled surface with alpha fade */
     if (banner_thumb) {
