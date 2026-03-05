@@ -567,8 +567,9 @@ static void formation_update(float dt) {
     /* Exponential approach (ease-out) formation morphing.
      * Formula: pos_new = pos_old + (target - pos_old) * α
      * where α = min(1, MORPH_SPEED * dt) = min(1, 0.25 * dt)
-     * This gives smooth asymptotic convergence: at 60fps, each frame closes 25% of gap.
-     * Result: formation changes feel organic, not snappy. */
+     * Frame-rate independent: always closes 25% of gap per second, regardless of fps.
+     * Example at 60fps: 16.67ms × 0.25 = 4.17% per frame; at 30fps: 8.33% per frame.
+     * Result: formation changes feel organic, not snappy, at any frame rate. */
     float alpha = MORPH_SPEED * dt;
     if (alpha > 1.0f) alpha = 1.0f;
     for (int i = 0; i < obj_count; i++) {

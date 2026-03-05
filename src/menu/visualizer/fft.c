@@ -189,7 +189,8 @@ void fft_process (int16_t *samples, int len, int channels) {
 
         /* Final smoothing: instant attack on peaks, moderate exponential decay.
          * Formula: smooth = (val > smooth) ? val : smooth * 0.85 + val * 0.15
-         * Gives bars fast rise but gradual fall (30ms decay @ 60fps). */
+         * Frame-rate independent: decay constant 0.85 gives smooth falloff at any fps.
+         * Time constant τ ≈ 1/(ln(0.85)) ≈ 6.5 frames. Example: at 60fps ≈ 108ms, at 20fps ≈ 325ms. */
         bands[i] = (val > bands[i]) ? val : bands[i] * 0.85f + val * 0.15f;
 
         /* Accumulate raw power for bass/mid/high levels */
