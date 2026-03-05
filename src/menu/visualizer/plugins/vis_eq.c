@@ -216,6 +216,11 @@ static float   tight_orbit_timer  = 0.0f;  /* accumulates; triggers tight zoom *
 static float   tight_orbit_period = 60.0f; /* randomised each cycle (50–80 s) */
 #define TIGHT_ORBIT_HOLD  5.0f              /* seconds to hold tight orbit */
 
+/* Diagnostic: track camera jumps — detect anomalies without per-frame spam */
+static float   cam_prev_x = 0.0f, cam_prev_y = 0.0f, cam_prev_z = 0.0f;
+static float   cam_jump_accum = 0.0f;  /* accumulates frame-to-frame deltas */
+#define CAM_JUMP_THRESHOLD 50.0f        /* alert if jump > this units per frame */
+
 static uint32_t form_seed = 0;          /* re-randomized on each formation transition */
 
 /* Formation state machine */
@@ -1438,6 +1443,40 @@ static void camera_update(const vis_audio_t *audio) {
     cam_target = (T3DVec3){{ 0.0f,
         orbit_ty + (ov_ty - orbit_ty) * ob,
         0.0f }};
+
+    /* Diagnostic: detect camera jumps that could cause glitch artifacts */
+    float dx = cam_eye.v[0] - cam_prev_x;
+    float dy = cam_eye.v[1] - cam_prev_y;
+    float dz = cam_eye.v[2] - cam_prev_z;
+    float jump_dist = sqrtf(dx*dx + dy*dy + dz*dz);
+    cam_jump_accum += jump_dist;
+
+    /* Log if large jump detected (frame-to-frame delta > threshold) */
+    if (jump_dist > CAM_JUMP_THRESHOLD) {
+        debugf("[CAM_JUMP] dist=%.2f dx=%.2f dy=%.2f dz=%.2f "
+               "pos=(%.1f,%.1f,%.1f) blend_o=%.2f blend_t=%.2f fps=%.1f\n",
+               jump_dist, dx, dy, dz,
+               cam_eye.v[0], cam_eye.v[1], cam_eye.v[2],
+               overhead_blend, tight_orbit_blend,
+               (audio->dt > 0.001f) ? 1.0f / audio->dt : 20.0f);
+    }
+
+    /* Periodic summary of average movement */
+    static float diag_timer = 0.0f;
+    diag_timer += frame_dt;
+    if (diag_timer >= 5.0f) {  /* every 5 seconds */
+        float avg_jump = cam_jump_accum / (diag_timer / frame_dt + 1);
+        debugf("[CAM_AVG] 5sec_avg_jump=%.3f cam=(%.1f,%.1f,%.1f) "
+               "angle=%.2f wall_t=%.1f oh_b=%.3f ti_b=%.3f\n",
+               avg_jump, cam_eye.v[0], cam_eye.v[1], cam_eye.v[2],
+               cam_angle, wall_time, overhead_blend, tight_orbit_blend);
+        diag_timer = 0.0f;
+        cam_jump_accum = 0.0f;
+    }
+
+    cam_prev_x = cam_eye.v[0];
+    cam_prev_y = cam_eye.v[1];
+    cam_prev_z = cam_eye.v[2];
 }
 
 /*===========================================================================
