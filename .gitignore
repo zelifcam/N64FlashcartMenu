@@ -4,6 +4,7 @@
 # Ignore compilation result directories
 /build
 /output
+/testing/build
 /docs/api
 /_site
 
