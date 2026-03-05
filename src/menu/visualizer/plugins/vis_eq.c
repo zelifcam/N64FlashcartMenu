@@ -1131,6 +1131,8 @@ static void formation_update(float dt) {
         } else {
             form_hold_remaining = rng_float(HOLD_OTHER_MIN, HOLD_OTHER_MAX);
         }
+        debugf("[VIS_EQ] Transition to form %d, hold=%.1fs (morph 15s + hold %.1fs = total %.1fs)\n",
+               next, form_hold_remaining, form_hold_remaining, 15.0f + form_hold_remaining);
 
         /* Reset morph timer and auto target picker for the next formation */
         form_morph_time = 0.0f;
@@ -1387,8 +1389,8 @@ static void camera_update(const vis_audio_t *audio) {
     if (tight_orbit_blend < 0.0f) tight_orbit_blend = 0.0f;
     if (tight_orbit_blend > 1.0f) tight_orbit_blend = 1.0f;
 
-    /* Orbit — constant speed, always advancing */
-    cam_angle += 0.10f * frame_dt;
+    /* Orbit — constant speed, always advancing, derived from wall clock */
+    cam_angle = wall_time * 0.10f;  /* 0.10 rad/sec = one orbit every ~63s */
 
     /* Height breathing — two incommensurate sine waves (LCG-like) ensure view never repeats.
      * Formula: h_raw = 0.72 + 0.20*sin(t*0.0785) + 0.12*sin(t*0.273)
