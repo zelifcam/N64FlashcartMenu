@@ -198,11 +198,14 @@ static void assign_band_color(world_obj_t *o, int i, int n) {
     if (o->band_hi < o->band_lo) o->band_hi = o->band_lo;
     if (o->band_hi >= FFT_NUM_BANDS) o->band_hi = FFT_NUM_BANDS - 1;
 
-    /* Spectrum color: interpolate across spectrum based on bar position */
+    /* Spectrum color: bass(red) → mid(green) → treble(blue).
+     * t ∈ [0,1] represents position across all active bars.
+     * R: linear decay 255→0, G: sine peak (sin(t*π) is 0 at edges, 1 at t=0.5),
+     * B: linear rise 0→255. Result: smooth red→yellow→green→cyan→blue gradient. */
     float t = (n > 1) ? (float)i / (n - 1) : 0.0f;
-    o->color = ((uint32_t)((uint8_t)((1.0f - t) * 255)) << 24) |
-               ((uint32_t)((uint8_t)(fm_sinf(t * T3D_PI) * 220)) << 16) |
-               ((uint32_t)((uint8_t)(t * 255)) << 8) | 0xFF;
+    o->color = ((uint32_t)((uint8_t)((1.0f - t) * 255)) << 24) |           /* R: 255→0 */
+               ((uint32_t)((uint8_t)(fm_sinf(t * T3D_PI) * 220)) << 16) |   /* G: sin(t*π)*220 */
+               ((uint32_t)((uint8_t)(t * 255)) << 8) | 0xFF;              /* B: 0→255 */
 }
 
 
@@ -561,9 +564,11 @@ static void formation_set_targets(formation_t form) {
 
 /* Advance the lerp and state machine each frame */
 static void formation_update(float dt) {
-    /* Lerp all bar positions toward their targets.
-     * MORPH_SPEED is the fraction of remaining distance closed per second,
-     * giving a smooth ease-out (exponential approach). */
+    /* Exponential approach (ease-out) formation morphing.
+     * Formula: pos_new = pos_old + (target - pos_old) * α
+     * where α = min(1, MORPH_SPEED * dt) = min(1, 0.25 * dt)
+     * This gives smooth asymptotic convergence: at 60fps, each frame closes 25% of gap.
+     * Result: formation changes feel organic, not snappy. */
     float alpha = MORPH_SPEED * dt;
     if (alpha > 1.0f) alpha = 1.0f;
     for (int i = 0; i < obj_count; i++) {
@@ -837,22 +842,30 @@ static void camera_update(const vis_audio_t *audio) {
     /* Orbit — constant speed, always advancing */
     cam_angle += 0.10f * frame_dt;
 
-    /* Height — two incommensurate sines keep the view always changing */
+    /* Height breathing — two incommensurate sine waves (LCG-like) ensure view never repeats.
+     * Formula: h_raw = 0.72 + 0.20*sin(t*0.0785) + 0.12*sin(t*0.273)
+     * Period1=80s, Period2=23s → LCM≈1840s before repeating (31 min loops).
+     * Centered at 0.72 (spends ~75% overhead), then smoothstep to 0-1 range for camera blend. */
     float h_raw = 0.72f
         + 0.20f * fm_sinf(wall_time * 0.0785f)   /* ~80s period */
         + 0.12f * fm_sinf(wall_time * 0.273f);   /* ~23s period */
     if (h_raw < 0.0f) h_raw = 0.0f;
     if (h_raw > 1.0f) h_raw = 1.0f;
-    float h_norm = h_raw * h_raw * (3.0f - 2.0f * h_raw); /* smoothstep */
+    float h_norm = h_raw * h_raw * (3.0f - 2.0f * h_raw); /* Smoothstep: 3t²-2t³ easing curve */
 
     /* Orbit camera position — smooth bar scale to avoid snap on formation transitions */
     float bar_scale_target = (form_current == FORM_LINE)
         ? (float)obj_count / (float)BAR_COUNT_DEFAULT : 1.0f;
     cam_bar_scale += (bar_scale_target - cam_bar_scale) * 0.4f * frame_dt;
+    /* Orbit radius combines multiple scales:
+     * - Base radius (260) scaled by bar count ratio (cam_bar_scale)
+     * - Height scaling: ~35% reduction at h_norm=1 (overhead view pulls back)
+     * - Formation scale: 1.0 for line (full pullback), 0.45 for compact shapes
+     * - Subtle breathing: ±7% sine modulation (period ~60s) adds organic movement */
     float r = WORLD_RADIUS * cam_bar_scale
-        * (1.0f - 0.35f * h_norm)
-        * form_cam_scale
-        * (1.0f + 0.07f * fm_sinf(wall_time * 0.11f));
+        * (1.0f - 0.35f * h_norm)           /* Height-based pullback */
+        * form_cam_scale                    /* Formation-based zoom */
+        * (1.0f + 0.07f * fm_sinf(wall_time * 0.11f));  /* Breathing modulation */
 
     float orbit_x  = fm_cosf(cam_angle) * r;
     float orbit_y  = FLOOR_Y + BAR_MAX_HEIGHT * 2.8f * h_norm;
@@ -1119,7 +1132,9 @@ static void world_render(const vis_audio_t *audio) {
     starfield_draw(s_star_bass);
 
     /* Smoothly rotate up vector from (0,1,0) → (1,0,0) as overhead_blend rises.
-     * angle sweeps 0 → π/2; result is always unit length, never degenerate. */
+     * Angle interpolation avoids hard switch at 0.5 blend which would cause gimbal lock:
+     * up_angle = blend * π/2, then up = (sin(θ), cos(θ), 0) traces quarter circle.
+     * Result always unit length and never aligned with forward vector (camera remains valid). */
     float up_angle = overhead_blend * T3D_PI * 0.5f;
     T3DVec3 up = {{ fm_sinf(up_angle), fm_cosf(up_angle), 0.0f }};
     t3d_viewport_look_at(&viewport, &cam_eye, &cam_target, &up);
@@ -1129,7 +1144,10 @@ static void world_render(const vis_audio_t *audio) {
     rdpq_mode_combiner(RDPQ_COMBINER_SHADE);
     t3d_state_set_drawflags(T3D_FLAG_SHADED);
 
-    /* Normalised 3D forward vector for behind-camera cull test. */
+    /* Compute normalised 3D forward vector for behind-camera cull test.
+     * Dot product of bar position against this vector determines visibility:
+     * if dot(pos - cam_eye, forward) < -(height * bias + bar_width*2), cull bar.
+     * Prevents rendering bars that are completely behind the camera. */
     float ftx = cam_target.v[0] - cam_eye.v[0];
     float fty = cam_target.v[1] - cam_eye.v[1];
     float ftz = cam_target.v[2] - cam_eye.v[2];

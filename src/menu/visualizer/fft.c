@@ -103,11 +103,13 @@ void fft_init (void) {
         band_bin_lo[i] = lo;
         band_bin_hi[i] = hi;
 
-        /* Perceptual gain: exponential from 0.04 (bass) to 4.0 (treble).
+        /* Perceptual gain: exponential curve from 0.04 (bass) to 4.0 (treble).
+         * Formula: g(t) = 0.04 * exp(t * ln(100)) = 0.04 * 100^t for t ∈ [0,1]
+         * This matches human hearing: bass needs less boost, treble needs more.
          * Above 75% of bands the curve plateaus at 4.0 — high bands need
          * maximum boost to be visible at all. */
         float t = (FFT_NUM_BANDS > 1) ? (float)i / (FFT_NUM_BANDS - 1) : 0.0f;
-        float g = 0.04f * expf(t * logf(4.0f / 0.04f));
+        float g = 0.04f * expf(t * logf(4.0f / 0.04f));  /* Exponential: 0.04^(1-t) * 4.0^t */
         if (g > 4.0f) g = 4.0f;
         band_gain[i] = g;
     }
@@ -169,19 +171,25 @@ void fft_process (int16_t *samples, int len, int channels) {
         }
         float val = sum * (1.0f / count) * band_gain[i];
 
-        /* Asymmetric running average — fast rise, slow fall.
+        /* Asymmetric running average — fast rise, slow fall (EMA algorithm).
+         * Formula: avg_new = avg_old * (1-α) + val * α
+         * α = BAND_AVG_RISE (0.30) when val > avg, else BAND_AVG_FALL (0.05)
          * Tracks the band's medium-term energy level so the ratio below
-         * reflects relative dynamics rather than absolute level. */
+         * reflects relative dynamics rather than absolute level.
+         * Example: loud phrase quickly boosted, quiet passage slowly decays. */
         float alpha = (val > band_avg[i]) ? BAND_AVG_RISE : BAND_AVG_FALL;
         band_avg[i] = band_avg[i] * (1.0f - alpha) + val * alpha;
 
         /* Normalise by running average (imm/avg ratio, MilkDrop style).
-         * Floor prevents noise amplification in silent bands. */
+         * Output = immediate_power / average_power (handles hyper-compressed audio).
+         * Floor prevents noise amplification in truly silent bands. */
         float denom = (band_avg[i] > BAND_FLOOR) ? band_avg[i] : BAND_FLOOR;
         val = val / denom;
         if (val > 1.0f) val = 1.0f;
 
-        /* Instant attack, moderate decay */
+        /* Final smoothing: instant attack on peaks, moderate exponential decay.
+         * Formula: smooth = (val > smooth) ? val : smooth * 0.85 + val * 0.15
+         * Gives bars fast rise but gradual fall (30ms decay @ 60fps). */
         bands[i] = (val > bands[i]) ? val : bands[i] * 0.85f + val * 0.15f;
 
         /* Accumulate raw power for bass/mid/high levels */
