@@ -1,10 +1,13 @@
 #include "../mp3_player.h"
 #include "../sound.h"
+#include "../path.h"
 #include "views.h"
 
 
 #define SEEK_SECONDS        (5)
 #define SEEK_SECONDS_FAST   (60)
+
+static bool advance_failed = false;
 
 
 static char *convert_error_message (mp3player_err_t err) {
@@ -34,13 +37,50 @@ static void format_elapsed_duration (char *buffer, float elapsed, float duration
 }
 
 
+/** Try to skip to the next (direction=1) or previous (direction=-1) music file.
+ *  Scans linearly from the current position — does NOT wrap around.
+ *  Returns true if a new track was loaded and started playing. */
+static bool try_skip_track (menu_t *menu, int direction) {
+    int current = menu->browser.selected;
+    int count = menu->browser.entries;
+
+    for (int idx = current + direction; idx >= 0 && idx < count; idx += direction) {
+        entry_t *e = &menu->browser.list[idx];
+        if (e->type != ENTRY_TYPE_MUSIC) continue;
+
+        path_t *path = path_clone_push(menu->browser.directory, e->name);
+        mp3player_err_t err = mp3player_load(path_get(path));
+        path_free(path);
+        if (err != MP3PLAYER_OK) continue;
+
+        err = mp3player_play();
+        if (err != MP3PLAYER_OK) continue;
+
+        menu->browser.selected = idx;
+        menu->browser.entry = e;
+        advance_failed = false;
+        return true;
+    }
+    return false;
+}
+
 static void process (menu_t *menu) {
     mp3player_err_t err;
 
     err = mp3player_process();
     if (err != MP3PLAYER_OK) {
         menu_show_error(menu, convert_error_message(err));
-    } else if (menu->actions.back) {
+        return;
+    }
+
+    /* Auto-advance to next track when current one finishes */
+    if (mp3player_is_finished() && !advance_failed) {
+        if (!try_skip_track(menu, 1)) {
+            advance_failed = true;
+        }
+    }
+
+    if (menu->actions.back) {
         sound_play_effect(SFX_EXIT);
         menu->next_mode = MENU_MODE_BROWSER;
     } else if (menu->actions.enter) {
@@ -49,6 +89,8 @@ static void process (menu_t *menu) {
             menu_show_error(menu, convert_error_message(err));
         }
         sound_play_effect(SFX_ENTER);
+    } else if (menu->actions.go_up || menu->actions.go_down) {
+        try_skip_track(menu, menu->actions.go_up ? -1 : 1);
     } else if (menu->actions.go_left || menu->actions.go_right) {
         int seconds = menu->actions.go_fast ? SEEK_SECONDS_FAST : SEEK_SECONDS;
         err = mp3player_seek(menu->actions.go_left ? (-seconds) : seconds);
@@ -116,6 +158,7 @@ static void draw (menu_t *menu, surface_t *d) {
         STL_DEFAULT,
         ALIGN_CENTER, VALIGN_TOP,
         "◀ Rewind | Fast forward ▶\n"
+        "▲ Prev track | Next track ▼\n"
     );
 
     rdpq_detach_show();
@@ -129,6 +172,8 @@ static void deinit (void) {
 
 void view_music_player_init (menu_t *menu) {
     mp3player_err_t err;
+
+    advance_failed = false;
 
     err = mp3player_init();
     if (err != MP3PLAYER_OK) {
