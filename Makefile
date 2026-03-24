@@ -48,6 +48,7 @@ SRCS = \
 	menu/fonts.c \
 	menu/hdmi.c \
 	menu/menu.c \
+	menu/id3_parser.c \
 	menu/mp3_player.c \
 	menu/path.c \
 	menu/png_decoder.c \

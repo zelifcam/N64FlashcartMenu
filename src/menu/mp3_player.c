@@ -10,6 +10,7 @@
 #include <libdragon.h>
 
 #include "mp3_player.h"
+#include "id3_parser.h"
 #include "sound.h"
 #include "utils/fs.h"
 #include "utils/utils.h"
@@ -38,6 +39,8 @@ typedef struct {
     int seek_predecode_frames; /**< Number of frames to pre-decode when seeking */
     float duration; /**< Duration of the MP3 file */
     float bitrate; /**< Bitrate of the MP3 file */
+
+    id3_metadata_t metadata; /**< ID3 tag metadata */
 
     waveform_t wave; /**< Waveform structure for playback */
 } mp3player_t;
@@ -208,6 +211,8 @@ mp3player_err_t mp3player_load (char *path) {
         return MP3PLAYER_ERR_IO;
     }
     p->file_size = st.st_size;
+
+    id3_parse(p->f, p->file_size, &p->metadata);
 
     mp3player_reset_decoder();
 
@@ -454,4 +459,10 @@ float mp3player_get_progress (void) {
     long data_position = (data_consumed > p->data_start) ? (data_consumed - p->data_start) : 0;
 
     return data_position / (float) (data_size);
+}
+
+const id3_metadata_t *mp3player_get_metadata (void) {
+    static const id3_metadata_t empty = {0};
+    if (!p || !p->loaded) return &empty;
+    return &p->metadata;
 }

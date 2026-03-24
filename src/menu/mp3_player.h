@@ -9,7 +9,9 @@
 
 #include <stdbool.h>
 
-/** 
+#include "id3_parser.h"
+
+/**
  * @brief MP3 file error enumeration.
  * 
  * Enumeration for different types of errors that can occur in the MP3 player.
@@ -168,5 +170,12 @@ int mp3player_get_samplerate(void);
  * @return float Current playback progress as a percentage (0.0 to 100.0).
  */
 float mp3player_get_progress(void);
+
+/**
+ * @brief Get metadata extracted from ID3 tags.
+ *
+ * @return const id3_metadata_t* Pointer to metadata (valid while file is loaded).
+ */
+const id3_metadata_t *mp3player_get_metadata(void);
 
 #endif /* MP3_PLAYER_H__ */

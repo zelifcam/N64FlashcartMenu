@@ -3,6 +3,7 @@
 #include "../mp3_player.h"
 #include "../sound.h"
 #include "../path.h"
+#include "../ui_components/constants.h"
 #include "views.h"
 
 
@@ -28,6 +29,7 @@ static const char *playback_mode_name[] = {
 
 static playback_mode_t playback_mode = PLAYBACK_NORMAL;
 static bool advance_failed = false;
+static float ticker_offset = 0.0f;
 
 /* Shuffle state: array of browser indices that point to music files */
 static int *shuffle_list = NULL;
@@ -45,20 +47,13 @@ static char *convert_error_message (mp3player_err_t err) {
     }
 }
 
-static void format_elapsed_duration (char *buffer, float elapsed, float duration) {
-    strcpy(buffer, "");
-
-    if (duration >= 3600) {
-        sprintf(buffer + strlen(buffer), "%02ld:", (uint32_t) (elapsed) / 3600);
+static void format_time (char *buffer, float seconds) {
+    int s = (int)seconds;
+    if (s >= 3600) {
+        sprintf(buffer, "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60);
+    } else {
+        sprintf(buffer, "%02d:%02d", s / 60, s % 60);
     }
-    sprintf(buffer + strlen(buffer), "%02ld:%02ld", ((uint32_t) (elapsed) % 3600) / 60, (uint32_t) (elapsed) % 60);
-
-    strcat(buffer, " / ");
-
-    if (duration >= 3600) {
-        sprintf(buffer + strlen(buffer), "%02ld:", (uint32_t) (duration) / 3600);
-    }
-    sprintf(buffer + strlen(buffer), "%02ld:%02ld", ((uint32_t) (duration) % 3600) / 60, (uint32_t) (duration) % 60);
 }
 
 
@@ -235,44 +230,128 @@ static void draw (menu_t *menu, surface_t *d) {
 
     ui_components_seekbar_draw(mp3player_get_progress());
 
+    const id3_metadata_t *meta = mp3player_get_metadata();
+
+    const char *display_title = (meta->has_metadata && meta->title[0])
+        ? meta->title : menu->browser.entry->name;
+
+    /* Song title at top */
     ui_components_main_text_draw(
         STL_DEFAULT,
         ALIGN_CENTER, VALIGN_TOP,
-        "MUSIC PLAYER\n"
-        "\n"
         "%s",
-        menu->browser.entry->name
+        display_title
     );
 
-    char formatted_track_elapsed_length[64];
+    /* Ticker with metadata below the title */
+    int ticker_x = SEEKBAR_X + 8;
+    int ticker_w = SEEKBAR_WIDTH - 16;
+    int ticker_y = VISIBLE_AREA_Y0 + 42;
 
-    format_elapsed_duration(
-        formatted_track_elapsed_length,
-        mp3player_get_duration() * mp3player_get_progress(),
-        mp3player_get_duration()
+    char ticker_str[512] = "";
+    {
+        char *p = ticker_str;
+        size_t remaining = sizeof(ticker_str);
+        const char *sep = " \xC2\xB7 "; /* " · " UTF-8 middle dot */
+        bool need_sep = false;
+        if (meta->artist[0]) {
+            int n = snprintf(p, remaining, "%s", meta->artist);
+            p += n; remaining -= n; need_sep = true;
+        }
+        if (meta->album[0]) {
+            int n = snprintf(p, remaining, "%s%s", need_sep ? sep : "", meta->album);
+            p += n; remaining -= n; need_sep = true;
+        }
+        if (meta->track_number > 0) {
+            int n = snprintf(p, remaining, "%s%d", need_sep ? sep : "", meta->track_number);
+            p += n; remaining -= n; need_sep = true;
+        }
+        snprintf(p, remaining, "%s%dHz %.0fkbps",
+                 need_sep ? sep : "",
+                 mp3player_get_samplerate(),
+                 (double)(mp3player_get_bitrate() / 1000));
+    }
+
+    size_t ticker_len = strlen(ticker_str);
+
+    if (ticker_len > 0) {
+        /* Measure actual pixel width */
+        rdpq_textmetrics_t metrics = rdpq_text_printn(
+            &(rdpq_textparms_t) { .style_id = STL_DEFAULT },
+            FNT_DEFAULT,
+            -1000, -1000,
+            ticker_str, ticker_len
+        );
+        int full_width = (int)metrics.advance_x;
+
+        if (full_width <= ticker_w) {
+            /* Fits on screen, just center it */
+            rdpq_text_printn(
+                &(rdpq_textparms_t) {
+                    .style_id = STL_DEFAULT,
+                    .width = ticker_w,
+                    .align = ALIGN_CENTER,
+                },
+                FNT_DEFAULT,
+                ticker_x, ticker_y,
+                ticker_str, ticker_len
+            );
+        } else {
+            /* Too wide, scroll it */
+            const char *wrap_pad = "     ";
+            char scroll_str[576];
+            snprintf(scroll_str, sizeof(scroll_str), "%s%s%s%s", ticker_str, wrap_pad, ticker_str, wrap_pad);
+            size_t scroll_len = strlen(scroll_str);
+
+            int cycle_width = full_width + (int)rdpq_text_printn(
+                &(rdpq_textparms_t) { .style_id = STL_DEFAULT },
+                FNT_DEFAULT, -1000, -1000,
+                wrap_pad, strlen(wrap_pad)
+            ).advance_x;
+
+            ticker_offset += 0.5f;
+            if ((int)ticker_offset >= cycle_width) {
+                ticker_offset -= (float)cycle_width;
+            }
+
+            rdpq_set_scissor(SEEKBAR_X, ticker_y - 12, SEEKBAR_X + SEEKBAR_WIDTH, ticker_y + 4);
+
+            rdpq_text_printn(
+                &(rdpq_textparms_t) { .style_id = STL_DEFAULT },
+                FNT_DEFAULT,
+                ticker_x - (int)ticker_offset, ticker_y,
+                scroll_str, scroll_len
+            );
+
+            rdpq_set_scissor(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        }
+    }
+
+    /* Draw elapsed and duration times on the seekbar */
+    char elapsed_str[16];
+    char duration_str[16];
+    float duration = mp3player_get_duration();
+    format_time(elapsed_str, duration * mp3player_get_progress());
+    format_time(duration_str, duration);
+
+    int time_y = SEEKBAR_Y + 18;
+
+    rdpq_text_printn(
+        &(rdpq_textparms_t) { .style_id = STL_DEFAULT },
+        FNT_DEFAULT,
+        ticker_x, time_y,
+        elapsed_str, strlen(elapsed_str)
     );
 
-    ui_components_main_text_draw(
-        STL_DEFAULT,
-        ALIGN_LEFT, VALIGN_TOP,
-        "\n"
-        "\n"
-        "\n"
-        "\n"
-        " Track elapsed / length:\n"
-        "  %s\n"
-        "\n"
-        " Average bitrate:\n"
-        "  %.0f kbps\n"
-        "\n"
-        " Samplerate:\n"
-        "  %d Hz\n"
-        "\n"
-        " Playback: %s",
-        formatted_track_elapsed_length,
-        mp3player_get_bitrate() / 1000,
-        mp3player_get_samplerate(),
-        playback_mode_name[playback_mode]
+    rdpq_text_printn(
+        &(rdpq_textparms_t) {
+            .style_id = STL_DEFAULT,
+            .width = ticker_w,
+            .align = ALIGN_RIGHT,
+        },
+        FNT_DEFAULT,
+        ticker_x, time_y,
+        duration_str, strlen(duration_str)
     );
 
     ui_components_actions_bar_text_draw(
@@ -317,6 +396,7 @@ void view_music_player_init (menu_t *menu) {
 
     playback_mode = PLAYBACK_NORMAL;
     advance_failed = false;
+    ticker_offset = 0.0f;
 
     err = mp3player_init();
     if (err != MP3PLAYER_OK) {
