@@ -14,7 +14,7 @@
 
 #define SEEK_SECONDS        (5)
 #define SEEK_SECONDS_FAST   (60)
-#define COVER_ART_MAX_SIZE  (234)
+#define COVER_ART_MAX_SIZE  (238)
 
 typedef enum {
     PLAYBACK_NORMAL,
@@ -36,6 +36,10 @@ static const char *playback_mode_name[] = {
 static playback_mode_t playback_mode = PLAYBACK_NORMAL;
 static bool advance_failed = false;
 static float ticker_offset = 0.0f;
+
+#define QUEUE_LINE_HEIGHT   (16)
+#define QUEUE_GAP           (12)
+#define QUEUE_ARROW         "\xE2\x96\xB6 "  /* "▶ " UTF-8 */
 
 /* Shuffle state: array of browser indices that point to music files */
 static int *shuffle_list = NULL;
@@ -243,6 +247,7 @@ static void load_cover_art (path_t *directory) {
         free(cover_image);
         cover_image = NULL;
     }
+    cover_disp_size = 0;
     cover_dir_scan_active = false;
 
     const id3_metadata_t *meta = mp3player_get_metadata();
@@ -358,12 +363,13 @@ static bool try_skip_track (menu_t *menu, int direction) {
     if (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) {
         if (!shuffle_list || shuffle_count == 0) return false;
 
-        /* Prev in shuffle restarts the current track */
-        if (direction < 0) {
-            return try_play_index(menu, current);
-        }
+        shuffle_pos += direction;
 
-        shuffle_pos++;
+        /* Walked before the start */
+        if (shuffle_pos < 0) {
+            shuffle_pos = 0;
+            return false;
+        }
 
         /* Walked past the end */
         if (shuffle_pos >= shuffle_count) {
@@ -461,18 +467,33 @@ static void draw (menu_t *menu, surface_t *d) {
     const char *display_title = (meta->has_metadata && meta->title[0])
         ? meta->title : menu->browser.entry->name;
 
-    /* Song title at top */
-    ui_components_main_text_draw(
-        STL_DEFAULT,
-        ALIGN_CENTER, VALIGN_TOP,
-        "%s",
-        display_title
-    );
+    /* Center the title + ticker as a unit between top edge and art/content */
+    int content_top_y = VISIBLE_AREA_Y0 + 54;
+    int bar_top_y = SEEKBAR_Y - BORDER_THICKNESS;
+    int art_top_approx = cover_image
+        ? content_top_y + ((bar_top_y - content_top_y - 16 - cover_disp_size) / 2)
+        : content_top_y;
 
-    /* Ticker with metadata below the title */
+    int header_area_top = VISIBLE_AREA_Y0;
+    int header_unit_h = 30; /* title (~15px) + gap + ticker (~15px) */
+    int header_y = header_area_top + (art_top_approx - header_area_top - header_unit_h) / 2;
+
     int ticker_x = SEEKBAR_X + 8;
     int ticker_w = SEEKBAR_WIDTH - 16;
-    int ticker_y = VISIBLE_AREA_Y0 + 42;
+    int title_y = header_y + 12; /* baseline offset */
+    int ticker_y = title_y + 16;
+
+    /* Song title */
+    rdpq_text_printn(
+        &(rdpq_textparms_t) {
+            .style_id = STL_DEFAULT,
+            .width = SEEKBAR_WIDTH,
+            .align = ALIGN_CENTER,
+        },
+        FNT_DEFAULT,
+        SEEKBAR_X, title_y,
+        display_title, strlen(display_title)
+    );
 
     char ticker_str[512] = "";
     {
@@ -488,11 +509,7 @@ static void draw (menu_t *menu, surface_t *d) {
             int n = snprintf(p, remaining, "%s%s", need_sep ? sep : "", meta->album);
             p += n; remaining -= n; need_sep = true;
         }
-        if (meta->track_number > 0) {
-            int n = snprintf(p, remaining, "%s%d", need_sep ? sep : "", meta->track_number);
-            p += n; remaining -= n; need_sep = true;
-        }
-        snprintf(p, remaining, "%s%dHz %.0fkbps",
+        snprintf(p, remaining, "%s%dHz \xC2\xB7 %.0fkbps",
                  need_sep ? sep : "",
                  mp3player_get_samplerate(),
                  (double)(mp3player_get_bitrate() / 1000));
@@ -553,7 +570,87 @@ static void draw (menu_t *menu, surface_t *d) {
         }
     }
 
-    /* Render cover art if available */
+    /* Build the queue view: list of browser indices for music files */
+    int queue_indices[64];
+    int queue_count = 0;
+    int queue_current = -1;
+
+    if (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) {
+        /* Use the shuffle list directly */
+        if (shuffle_list && shuffle_count > 0) {
+            for (int i = 0; i < shuffle_count && queue_count < 64; i++) {
+                queue_indices[queue_count] = shuffle_list[i];
+                if (i == shuffle_pos) queue_current = queue_count;
+                queue_count++;
+            }
+        }
+    } else {
+        /* Normal/Loop/Repeat: scan browser list for music files in order */
+        for (int i = 0; i < menu->browser.entries && queue_count < 64; i++) {
+            if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
+                if (i == menu->browser.selected) queue_current = queue_count;
+                queue_indices[queue_count++] = i;
+            }
+        }
+    }
+
+    /* Compute the content area between ticker and seekbar */
+    int content_top = VISIBLE_AREA_Y0 + 54;
+    int content_bottom = SEEKBAR_Y - BORDER_THICKNESS - 8;
+    int content_h = content_bottom - content_top;
+
+    int art_size = cover_image ? cover_disp_size : 0;
+    int max_queue_lines = content_h / QUEUE_LINE_HEIGHT;
+    if (max_queue_lines < 1) max_queue_lines = 1;
+    if (max_queue_lines > 15) max_queue_lines = 15;
+
+    /* Determine visible queue window */
+    int window_start = 0;
+    int window_end = queue_count;
+
+    if (queue_count > max_queue_lines && queue_current >= 0) {
+        /* List doesn't fit, scroll with 2 previous tracks for context */
+        int prev_context = (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) ? 0 : 2;
+        window_start = queue_current - prev_context;
+        if (window_start < 0) window_start = 0;
+        window_end = window_start + max_queue_lines;
+        if (window_end > queue_count) {
+            window_end = queue_count;
+            window_start = queue_count - max_queue_lines;
+            if (window_start < 0) window_start = 0;
+        }
+    }
+
+    /* Calculate the queue text width */
+    int queue_w = 280;
+
+    /* Layout: art on left, queue on right, centered as a unit */
+    int block_w;
+    int art_x, art_y;
+    int queue_x, queue_y;
+
+    if (cover_image && art_size > 0) {
+        block_w = art_size + QUEUE_GAP + queue_w;
+        int block_x = DISPLAY_CENTER_X - block_w / 2;
+        art_x = block_x;
+        art_y = content_top + (content_h - art_size) / 2;
+        queue_x = block_x + art_size + QUEUE_GAP;
+    } else {
+        block_w = queue_w;
+        queue_x = DISPLAY_CENTER_X - queue_w / 2;
+    }
+
+    int visible_queue_h = (window_end - window_start) * QUEUE_LINE_HEIGHT;
+
+    if (cover_image && art_size > 0) {
+        /* Align queue top with cover art top, offset for text baseline */
+        queue_y = art_y + 12;
+    } else {
+        /* No art: center the queue vertically */
+        queue_y = content_top + (content_h - visible_queue_h) / 2;
+    }
+
+    /* Render cover art */
     if (cover_image) {
         int crop = (cover_image->width < cover_image->height)
                    ? cover_image->width : cover_image->height;
@@ -562,7 +659,7 @@ static void draw (menu_t *menu, surface_t *d) {
         rdpq_mode_filter(FILTER_BILINEAR);
         rdpq_mode_combiner(RDPQ_COMBINER_TEX_FLAT);
         rdpq_mode_blender(0);
-        rdpq_tex_blit(cover_image, cover_dst_x, cover_dst_y, &(rdpq_blitparms_t){
+        rdpq_tex_blit(cover_image, art_x, art_y, &(rdpq_blitparms_t){
             .s0 = cover_s0, .t0 = cover_t0,
             .width = crop, .height = crop,
             .scale_x = (float)cover_disp_size / crop,
@@ -570,6 +667,43 @@ static void draw (menu_t *menu, surface_t *d) {
             .filtering = true,
         });
         rdpq_mode_pop();
+    }
+
+    /* Render queue list */
+    if (queue_count > 0) {
+        for (int i = window_start; i < window_end; i++) {
+            int idx = queue_indices[i];
+            entry_t *e = &menu->browser.list[idx];
+
+            /* Strip .mp3 extension for cleaner display */
+            char name_buf[64];
+            strncpy(name_buf, e->name, sizeof(name_buf) - 1);
+            name_buf[sizeof(name_buf) - 1] = '\0';
+            char *dot = strrchr(name_buf, '.');
+            if (dot) *dot = '\0';
+
+            char line_buf[80];
+            if (i == queue_current) {
+                snprintf(line_buf, sizeof(line_buf), QUEUE_ARROW "%s", name_buf);
+            } else {
+                snprintf(line_buf, sizeof(line_buf), "  %s", name_buf);
+            }
+
+            int line_y = queue_y + (i - window_start) * QUEUE_LINE_HEIGHT;
+
+            int style = (i == queue_current) ? STL_DEFAULT : STL_GRAY;
+
+            rdpq_text_printn(
+                &(rdpq_textparms_t) {
+                    .style_id = style,
+                    .width = queue_w,
+                    .wrap = WRAP_ELLIPSES,
+                },
+                FNT_DEFAULT,
+                queue_x, line_y,
+                line_buf, strlen(line_buf)
+            );
+        }
     }
 
     /* Draw elapsed and duration times on the seekbar */
@@ -633,6 +767,7 @@ static void deinit (void) {
         free(cover_image);
         cover_image = NULL;
     }
+    cover_disp_size = 0;
     if (cover_dir) {
         path_free(cover_dir);
         cover_dir = NULL;
