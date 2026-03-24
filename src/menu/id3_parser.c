@@ -12,6 +12,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include <libdragon.h>
+
 #include "id3_parser.h"
 
 #define ID3V2_MAX_TAG_SIZE      (1024 * 1024)
@@ -284,12 +286,28 @@ static bool extract_apic(const uint8_t *data, size_t data_len, int id_len, id3_m
     /* Skip picture type byte */
     p++; remaining--;
 
-    /* Skip description (null-terminated) */
-    const uint8_t *desc_end = memchr(p, '\0', remaining);
-    if (!desc_end) return false;
-    size_t desc_len = desc_end - p;
-    p = desc_end + 1;
-    remaining -= (desc_len + 1);
+    /* Skip description string. UTF-16 encodings use double-null terminator. */
+    uint8_t encoding = data[0];
+    if (encoding == 0x01 || encoding == 0x02) {
+        /* UTF-16: scan for 0x00 0x00 on an even boundary */
+        bool found = false;
+        for (size_t i = 0; i + 1 < remaining; i += 2) {
+            if (p[i] == 0x00 && p[i + 1] == 0x00) {
+                p += i + 2;
+                remaining -= (i + 2);
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    } else {
+        /* ISO-8859-1 or UTF-8: single null terminator */
+        const uint8_t *desc_end = memchr(p, '\0', remaining);
+        if (!desc_end) return false;
+        size_t desc_len = desc_end - p;
+        p = desc_end + 1;
+        remaining -= (desc_len + 1);
+    }
 
     if (remaining < 8) return false;
 
@@ -404,7 +422,10 @@ void id3_parse(FILE *f, size_t file_size, id3_metadata_t *meta) {
     if (fread(header, 1, 10, f) == 10 && memcmp(header, "ID3", 3) == 0) {
         size_t tag_size = read_syncsafe(&header[6]) + 10;
         if (tag_size <= ID3V2_MAX_TAG_SIZE) {
-            uint8_t *tag_buf = malloc(tag_size);
+            heap_stats_t heap;
+            sys_get_heap_stats(&heap);
+            size_t free_mem = (size_t)(heap.total - heap.used);
+            uint8_t *tag_buf = (free_mem > tag_size + 64 * 1024) ? malloc(tag_size) : NULL;
             if (tag_buf) {
                 fseek(f, 0, SEEK_SET);
                 size_t rd = fread(tag_buf, 1, tag_size, f);

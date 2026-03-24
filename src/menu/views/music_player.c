@@ -12,9 +12,18 @@
 #include "views.h"
 
 
-#define SEEK_SECONDS        (5)
-#define SEEK_SECONDS_FAST   (60)
-#define COVER_ART_MAX_SIZE  (238)
+#define SEEK_SECONDS            (5)
+#define SEEK_SECONDS_FAST       (60)
+#define COVER_ART_MAX_SIZE      (238)
+#define CONTENT_TOP_OFFSET      (54)
+#define HEADER_UNIT_HEIGHT      (30)
+#define HEADER_BASELINE_OFFSET  (12)
+#define HEADER_LINE_SPACING     (16)
+#define CONTENT_BOTTOM_PAD      (8)
+#define QUEUE_MAX_VISIBLE       (15)
+#define QUEUE_TEXT_WIDTH         (280)
+#define TICKER_SCROLL_SPEED     (0.5f)
+#define COVER_SCAN_MAX_ATTEMPTS (20)
 
 typedef enum {
     PLAYBACK_NORMAL,
@@ -57,11 +66,24 @@ static cover_state_t cover_state = COVER_IDLE;
 static surface_t *cover_image = NULL;
 
 /* Cached blit parameters, computed once per loaded image */
-static int cover_dst_x;
-static int cover_dst_y;
 static int cover_disp_size;
 static int cover_s0;
 static int cover_t0;
+
+/* Lazy ID3 metadata cache for queue display */
+typedef struct {
+    int browser_idx;
+    char title[ID3_FIELD_MAX];
+    int track_number;
+    bool loaded;
+} queue_cache_entry_t;
+
+static queue_cache_entry_t *queue_cache = NULL;
+static int queue_cache_count = 0;
+
+/* Music file index map (browser indices of ENTRY_TYPE_MUSIC files) */
+static int *music_indices = NULL;
+static int music_count = 0;
 
 /* Directory scan state for async cover art search */
 static const char *cover_image_extensions[] = { "png", "jpg", "jpeg", NULL };
@@ -72,6 +94,89 @@ static bool cover_dir_scan_active = false;
 
 static void try_next_cover_source(void);
 
+/** Build the music file index map and allocate the lazy ID3 cache. */
+static void build_music_index_map (menu_t *menu) {
+    if (music_indices) { free(music_indices); music_indices = NULL; }
+    if (queue_cache) { free(queue_cache); queue_cache = NULL; }
+    music_count = 0;
+    queue_cache_count = 0;
+
+    /* Count music files */
+    int count = 0;
+    for (int i = 0; i < menu->browser.entries; i++) {
+        if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) count++;
+    }
+    if (count == 0) return;
+
+    music_indices = malloc(count * sizeof(int));
+    queue_cache = calloc(count, sizeof(queue_cache_entry_t));
+    if (!music_indices || !queue_cache) {
+        free(music_indices); music_indices = NULL;
+        free(queue_cache); queue_cache = NULL;
+        return;
+    }
+
+    for (int i = 0; i < menu->browser.entries; i++) {
+        if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
+            music_indices[music_count] = i;
+            queue_cache[music_count].browser_idx = i;
+            music_count++;
+        }
+    }
+    queue_cache_count = music_count;
+}
+
+/** Get the display name for a queue entry, lazily parsing ID3 if needed. */
+static const char *queue_entry_name (menu_t *menu, int queue_idx, char *buf, size_t buf_size) {
+    if (queue_idx < 0 || queue_idx >= queue_cache_count || !queue_cache) {
+        snprintf(buf, buf_size, "???");
+        return buf;
+    }
+
+    queue_cache_entry_t *c = &queue_cache[queue_idx];
+
+    /* Lazy parse: one track per frame max to avoid hitches */
+    if (!c->loaded) {
+        int bidx = c->browser_idx;
+        entry_t *e = &menu->browser.list[bidx];
+        path_t *path = path_clone_push(menu->browser.directory, e->name);
+
+        FILE *f = fopen(path_get(path), "rb");
+        if (f) {
+            struct stat st;
+            if (fstat(fileno(f), &st) == 0) {
+                id3_metadata_t meta;
+                id3_parse(f, st.st_size, &meta);
+                if (meta.has_metadata && meta.title[0]) {
+                    strncpy(c->title, meta.title, ID3_FIELD_MAX - 1);
+                    c->title[ID3_FIELD_MAX - 1] = '\0';
+                }
+                c->track_number = meta.track_number;
+            }
+            fclose(f);
+        }
+        path_free(path);
+        c->loaded = true;
+    }
+
+    /* Build display string: "3. Title" or "Title" or filename */
+    if (c->title[0]) {
+        if (c->track_number > 0) {
+            snprintf(buf, buf_size, "%d. %s", c->track_number, c->title);
+        } else {
+            snprintf(buf, buf_size, "%s", c->title);
+        }
+    } else {
+        /* Fall back to filename without extension */
+        entry_t *e = &menu->browser.list[c->browser_idx];
+        strncpy(buf, e->name, buf_size - 1);
+        buf[buf_size - 1] = '\0';
+        char *dot = strrchr(buf, '.');
+        if (dot) *dot = '\0';
+    }
+    return buf;
+}
+
 /** Compute and cache blit parameters for the loaded cover_image. */
 static void cover_cache_blit_params (void) {
     int iw = cover_image->width;
@@ -80,24 +185,26 @@ static void cover_cache_blit_params (void) {
     cover_t0 = (ih > iw) ? (ih - iw) / 2 : 0;
 
     /* Position: centered horizontally, between ticker and seekbar */
-    int text_bottom = VISIBLE_AREA_Y0 + 54;
+    int text_bottom = VISIBLE_AREA_Y0 + CONTENT_TOP_OFFSET;
     int bar_top = SEEKBAR_Y - BORDER_THICKNESS;
     int avail_h = bar_top - text_bottom - 16;
     int crop = (iw < ih) ? iw : ih;
     cover_disp_size = (avail_h < COVER_ART_MAX_SIZE) ? avail_h : COVER_ART_MAX_SIZE;
     if (cover_disp_size > crop) cover_disp_size = crop;
-    cover_dst_x = DISPLAY_CENTER_X - cover_disp_size / 2;
-    cover_dst_y = text_bottom + (avail_h - cover_disp_size) / 2;
 }
 
 /** Get the memory budget for cover art decode, based on free heap. */
 static int cover_art_budget_size (void) {
     heap_stats_t heap;
     sys_get_heap_stats(&heap);
-    size_t budget = (size_t)((heap.total - heap.used) * 0.8f);
+    size_t free_mem = (size_t)(heap.total - heap.used);
+    size_t budget = (size_t)(free_mem * 0.8f);
     int dim = (int)sqrtf((float)(budget / 2));
-    if (dim < COVER_ART_MAX_SIZE) dim = COVER_ART_MAX_SIZE;
+    /* Only clamp upward if heap can actually support the surface */
+    size_t min_surface = (size_t)COVER_ART_MAX_SIZE * COVER_ART_MAX_SIZE * 2;
+    if (dim < COVER_ART_MAX_SIZE && budget > min_surface) dim = COVER_ART_MAX_SIZE;
     if (dim > 400) dim = 400;
+    if (dim < 16) dim = 16;
     return dim;
 }
 
@@ -178,13 +285,13 @@ static void try_next_cover_source (void) {
     if (!cover_dir_scan_active || !cover_dir) return;
 
     int max_size = cover_art_budget_size();
+    int attempts = 0;
 
-    while (true) {
+    while (attempts < COVER_SCAN_MAX_ATTEMPTS) {
         if (cover_dir_entry.d_type == DT_REG &&
             file_has_extensions(cover_dir_entry.d_name, cover_image_extensions)) {
             path_t *candidate = path_clone_push(cover_dir, cover_dir_entry.d_name);
 
-            /* Advance scan state now — callback may call us again before we return */
             if (dir_findnext(path_get(cover_dir), &cover_dir_entry) != 0) {
                 cover_dir_scan_active = false;
             }
@@ -194,6 +301,7 @@ static void try_next_cover_source (void) {
                 return;
             }
             path_free(candidate);
+            attempts++;
         } else {
             if (dir_findnext(path_get(cover_dir), &cover_dir_entry) != 0) {
                 cover_dir_scan_active = false;
@@ -201,6 +309,9 @@ static void try_next_cover_source (void) {
             }
         }
     }
+
+    debugf("Cover art scan: gave up after %d failed attempts\n", attempts);
+    cover_dir_scan_active = false;
 }
 
 /** Scan the directory for a cover image, preferring known filenames. */
@@ -262,6 +373,21 @@ static void load_cover_art (path_t *directory) {
     scan_directory_for_cover(directory);
 }
 
+/** Escape '$' and '^' characters that rdpq_text interprets as control codes.
+ *  Doubles them ('$' -> '$$', '^' -> '^^') so they render as literals. */
+static void sanitize_rdpq_text (char *dst, const char *src, size_t dst_size) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j < dst_size - 1; i++) {
+        if ((src[i] == '$' || src[i] == '^') && j + 1 < dst_size - 1) {
+            dst[j++] = src[i];
+            dst[j++] = src[i];
+        } else {
+            dst[j++] = src[i];
+        }
+    }
+    dst[j] = '\0';
+}
+
 static char *convert_error_message (mp3player_err_t err) {
     switch (err) {
         case MP3PLAYER_ERR_OUT_OF_MEM: return "MP3 player failed due to insufficient memory";
@@ -272,12 +398,13 @@ static char *convert_error_message (mp3player_err_t err) {
     }
 }
 
-static void format_time (char *buffer, float seconds) {
+static void format_time (char *buffer, size_t buf_size, float seconds) {
     int s = (int)seconds;
+    if (s < 0) s = 0;
     if (s >= 3600) {
-        sprintf(buffer, "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60);
+        snprintf(buffer, buf_size, "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60);
     } else {
-        sprintf(buffer, "%02d:%02d", s / 60, s % 60);
+        snprintf(buffer, buf_size, "%02d:%02d", s / 60, s % 60);
     }
 }
 
@@ -450,7 +577,9 @@ static void process (menu_t *menu) {
 }
 
 static void draw (menu_t *menu, surface_t *d) {
-    if (cover_state == COVER_LOADING_PNG) {
+    if (cover_state == COVER_LOADING_JPEG) {
+        jpeg_decoder_poll();
+    } else if (cover_state == COVER_LOADING_PNG) {
         png_decoder_poll();
     }
 
@@ -468,22 +597,22 @@ static void draw (menu_t *menu, surface_t *d) {
         ? meta->title : menu->browser.entry->name;
 
     /* Center the title + ticker as a unit between top edge and art/content */
-    int content_top_y = VISIBLE_AREA_Y0 + 54;
+    int content_top_y = VISIBLE_AREA_Y0 + CONTENT_TOP_OFFSET;
     int bar_top_y = SEEKBAR_Y - BORDER_THICKNESS;
     int art_top_approx = cover_image
-        ? content_top_y + ((bar_top_y - content_top_y - 16 - cover_disp_size) / 2)
+        ? content_top_y + ((bar_top_y - content_top_y - CONTENT_BOTTOM_PAD * 2 - cover_disp_size) / 2)
         : content_top_y;
 
-    int header_area_top = VISIBLE_AREA_Y0;
-    int header_unit_h = 30; /* title (~15px) + gap + ticker (~15px) */
-    int header_y = header_area_top + (art_top_approx - header_area_top - header_unit_h) / 2;
+    int header_y = VISIBLE_AREA_Y0 + (art_top_approx - VISIBLE_AREA_Y0 - HEADER_UNIT_HEIGHT) / 2;
 
     int ticker_x = SEEKBAR_X + 8;
     int ticker_w = SEEKBAR_WIDTH - 16;
-    int title_y = header_y + 12; /* baseline offset */
-    int ticker_y = title_y + 16;
+    int title_y = header_y + HEADER_BASELINE_OFFSET;
+    int ticker_y = title_y + HEADER_LINE_SPACING;
 
-    /* Song title */
+    /* Song title (sanitized for rdpq control codes) */
+    char safe_title[256];
+    sanitize_rdpq_text(safe_title, display_title, sizeof(safe_title));
     rdpq_text_printn(
         &(rdpq_textparms_t) {
             .style_id = STL_DEFAULT,
@@ -492,7 +621,7 @@ static void draw (menu_t *menu, surface_t *d) {
         },
         FNT_DEFAULT,
         SEEKBAR_X, title_y,
-        display_title, strlen(display_title)
+        safe_title, strlen(safe_title)
     );
 
     char ticker_str[512] = "";
@@ -503,11 +632,13 @@ static void draw (menu_t *menu, surface_t *d) {
         bool need_sep = false;
         if (meta->artist[0]) {
             int n = snprintf(p, remaining, "%s", meta->artist);
-            p += n; remaining -= n; need_sep = true;
+            if (n < 0 || (size_t)n >= remaining) { remaining = 0; } else { p += n; remaining -= n; }
+            need_sep = true;
         }
-        if (meta->album[0]) {
+        if (meta->album[0] && remaining > 0) {
             int n = snprintf(p, remaining, "%s%s", need_sep ? sep : "", meta->album);
-            p += n; remaining -= n; need_sep = true;
+            if (n < 0 || (size_t)n >= remaining) { remaining = 0; } else { p += n; remaining -= n; }
+            need_sep = true;
         }
         snprintf(p, remaining, "%s%dHz \xC2\xB7 %.0fkbps",
                  need_sep ? sep : "",
@@ -552,7 +683,7 @@ static void draw (menu_t *menu, surface_t *d) {
                 wrap_pad, strlen(wrap_pad)
             ).advance_x;
 
-            ticker_offset += 0.5f;
+            ticker_offset += TICKER_SCROLL_SPEED;
             if ((int)ticker_offset >= cycle_width) {
                 ticker_offset -= (float)cycle_width;
             }
@@ -570,39 +701,36 @@ static void draw (menu_t *menu, surface_t *d) {
         }
     }
 
-    /* Build the queue view: list of browser indices for music files */
-    int queue_indices[64];
+    /* Build the queue view using the pre-built music index map */
     int queue_count = 0;
     int queue_current = -1;
+    int *queue_indices = NULL;
 
     if (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) {
-        /* Use the shuffle list directly */
-        if (shuffle_list && shuffle_count > 0) {
-            for (int i = 0; i < shuffle_count && queue_count < 64; i++) {
-                queue_indices[queue_count] = shuffle_list[i];
-                if (i == shuffle_pos) queue_current = queue_count;
-                queue_count++;
-            }
-        }
+        queue_indices = shuffle_list;
+        queue_count = shuffle_count;
+        queue_current = shuffle_pos;
     } else {
-        /* Normal/Loop/Repeat: scan browser list for music files in order */
-        for (int i = 0; i < menu->browser.entries && queue_count < 64; i++) {
-            if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
-                if (i == menu->browser.selected) queue_current = queue_count;
-                queue_indices[queue_count++] = i;
+        queue_indices = music_indices;
+        queue_count = music_count;
+        /* Find current track in the music index map */
+        for (int i = 0; i < music_count; i++) {
+            if (music_indices[i] == menu->browser.selected) {
+                queue_current = i;
+                break;
             }
         }
     }
 
     /* Compute the content area between ticker and seekbar */
-    int content_top = VISIBLE_AREA_Y0 + 54;
-    int content_bottom = SEEKBAR_Y - BORDER_THICKNESS - 8;
+    int content_top = VISIBLE_AREA_Y0 + CONTENT_TOP_OFFSET;
+    int content_bottom = SEEKBAR_Y - BORDER_THICKNESS - CONTENT_BOTTOM_PAD;
     int content_h = content_bottom - content_top;
 
     int art_size = cover_image ? cover_disp_size : 0;
     int max_queue_lines = content_h / QUEUE_LINE_HEIGHT;
     if (max_queue_lines < 1) max_queue_lines = 1;
-    if (max_queue_lines > 15) max_queue_lines = 15;
+    if (max_queue_lines > QUEUE_MAX_VISIBLE) max_queue_lines = QUEUE_MAX_VISIBLE;
 
     /* Determine visible queue window */
     int window_start = 0;
@@ -622,7 +750,7 @@ static void draw (menu_t *menu, surface_t *d) {
     }
 
     /* Calculate the queue text width */
-    int queue_w = 280;
+    int queue_w = QUEUE_TEXT_WIDTH;
 
     /* Layout: art on left, queue on right, centered as a unit */
     int block_w;
@@ -670,27 +798,41 @@ static void draw (menu_t *menu, surface_t *d) {
     }
 
     /* Render queue list */
-    if (queue_count > 0) {
+    if (queue_count > 0 && queue_indices) {
         for (int i = window_start; i < window_end; i++) {
-            int idx = queue_indices[i];
-            entry_t *e = &menu->browser.list[idx];
+            int bidx = queue_indices[i];
 
-            /* Strip .mp3 extension for cleaner display */
-            char name_buf[64];
-            strncpy(name_buf, e->name, sizeof(name_buf) - 1);
-            name_buf[sizeof(name_buf) - 1] = '\0';
-            char *dot = strrchr(name_buf, '.');
-            if (dot) *dot = '\0';
+            /* Find the cache index for this browser index */
+            int cache_idx = -1;
+            for (int c = 0; c < queue_cache_count; c++) {
+                if (queue_cache[c].browser_idx == bidx) {
+                    cache_idx = c;
+                    break;
+                }
+            }
 
-            char line_buf[80];
-            if (i == queue_current) {
-                snprintf(line_buf, sizeof(line_buf), QUEUE_ARROW "%s", name_buf);
+            char name_buf[160];
+            if (cache_idx >= 0) {
+                queue_entry_name(menu, cache_idx, name_buf, sizeof(name_buf));
             } else {
-                snprintf(line_buf, sizeof(line_buf), "  %s", name_buf);
+                entry_t *e = &menu->browser.list[bidx];
+                strncpy(name_buf, e->name, sizeof(name_buf) - 1);
+                name_buf[sizeof(name_buf) - 1] = '\0';
+                char *dot = strrchr(name_buf, '.');
+                if (dot) *dot = '\0';
+            }
+
+            char safe_name[256];
+            sanitize_rdpq_text(safe_name, name_buf, sizeof(safe_name));
+
+            char line_buf[288];
+            if (i == queue_current) {
+                snprintf(line_buf, sizeof(line_buf), QUEUE_ARROW "%s", safe_name);
+            } else {
+                snprintf(line_buf, sizeof(line_buf), "  %s", safe_name);
             }
 
             int line_y = queue_y + (i - window_start) * QUEUE_LINE_HEIGHT;
-
             int style = (i == queue_current) ? STL_DEFAULT : STL_GRAY;
 
             rdpq_text_printn(
@@ -710,8 +852,8 @@ static void draw (menu_t *menu, surface_t *d) {
     char elapsed_str[16];
     char duration_str[16];
     float duration = mp3player_get_duration();
-    format_time(elapsed_str, duration * mp3player_get_progress());
-    format_time(duration_str, duration);
+    format_time(elapsed_str, sizeof(elapsed_str), duration * mp3player_get_progress());
+    format_time(duration_str, sizeof(duration_str), duration);
 
     int time_y = SEEKBAR_Y + 18;
 
@@ -780,6 +922,11 @@ static void deinit (void) {
     }
     shuffle_count = 0;
 
+    if (music_indices) { free(music_indices); music_indices = NULL; }
+    if (queue_cache) { free(queue_cache); queue_cache = NULL; }
+    music_count = 0;
+    queue_cache_count = 0;
+
     sound_init_default();
     mp3player_deinit();
 }
@@ -791,6 +938,20 @@ void view_music_player_init (menu_t *menu) {
     playback_mode = PLAYBACK_NORMAL;
     advance_failed = false;
     ticker_offset = 0.0f;
+
+    /* Reset cover art state in case previous session was interrupted */
+    if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_abort();
+    if (cover_state == COVER_LOADING_PNG) png_decoder_abort();
+    cover_state = COVER_IDLE;
+    if (cover_image) {
+        surface_free(cover_image);
+        free(cover_image);
+        cover_image = NULL;
+    }
+    cover_disp_size = 0;
+    cover_dir_scan_active = false;
+
+    build_music_index_map(menu);
 
     err = mp3player_init();
     if (err != MP3PLAYER_OK) {

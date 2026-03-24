@@ -279,6 +279,8 @@ void mp3player_unload (void) {
  * @return mp3player_err_t Error code.
  */
 mp3player_err_t mp3player_process (void) {
+    if (!p || !p->loaded) return MP3PLAYER_OK;
+
     if (ferror(p->f)) {
         mp3player_unload();
         return MP3PLAYER_ERR_IO;
