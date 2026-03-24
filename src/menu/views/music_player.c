@@ -95,7 +95,8 @@ static void build_shuffle_list (menu_t *menu) {
         }
     }
 
-    /* Fisher-Yates shuffle */
+    /* Fisher-Yates shuffle, seeded from hardware entropy */
+    srand(getentropy32());
     for (int i = shuffle_count - 1; i > 0; i--) {
         int j = rand() % (i + 1);
         int tmp = shuffle_list[i];
@@ -140,7 +141,12 @@ static bool try_skip_track (menu_t *menu, int direction) {
     if (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) {
         if (!shuffle_list || shuffle_count == 0) return false;
 
-        shuffle_pos += direction;
+        /* Prev in shuffle restarts the current track */
+        if (direction < 0) {
+            return try_play_index(menu, current);
+        }
+
+        shuffle_pos++;
 
         /* Walked past the end */
         if (shuffle_pos >= shuffle_count) {
@@ -152,16 +158,10 @@ static bool try_skip_track (menu_t *menu, int direction) {
             }
         }
 
-        /* Walked before the start */
-        if (shuffle_pos < 0) {
-            shuffle_pos = 0;
-            return false;
-        }
-
         /* Try each remaining entry in the shuffle list, skip broken files */
-        while (shuffle_pos >= 0 && shuffle_pos < shuffle_count) {
+        while (shuffle_pos < shuffle_count) {
             if (try_play_index(menu, shuffle_list[shuffle_pos])) return true;
-            shuffle_pos += direction;
+            shuffle_pos++;
         }
         return false;
     }
