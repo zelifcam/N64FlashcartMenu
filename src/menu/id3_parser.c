@@ -10,10 +10,14 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "id3_parser.h"
 
-#define ID3V2_MAX_TAG_SIZE  (1024 * 1024)
+#define ID3V2_MAX_TAG_SIZE      (1024 * 1024)
+#define COVER_ART_TEMP_PATH_PNG "sd:/menu/cache/cover_tmp.png"
+#define COVER_ART_TEMP_PATH_JPG "sd:/menu/cache/cover_tmp.jpg"
+#define COVER_ART_CACHE_DIR     "sd:/menu/cache"
 
 
 /* --- UTF-16 to UTF-8 conversion --- */
@@ -230,6 +234,84 @@ static bool is_track_frame(const uint8_t *id, int id_len) {
     return false;
 }
 
+/** Check if a frame ID is an attached picture frame. */
+static bool is_apic_frame(const uint8_t *id, int id_len) {
+    if (id_len == 4) return memcmp(id, "APIC", 4) == 0;
+    if (id_len == 3) return memcmp(id, "PIC", 3) == 0;
+    return false;
+}
+
+/** Ensure the cache directory exists, creating it if needed. */
+static void ensure_cache_dir(void) {
+    mkdir(COVER_ART_CACHE_DIR, 0777);
+}
+
+/** Extract an APIC frame's image data to a temp file on the SD card.
+ *  Returns true on success. */
+static bool extract_apic(const uint8_t *data, size_t data_len, int id_len, id3_metadata_t *meta) {
+    if (data_len < 4) return false;
+
+    /* Skip encoding byte */
+    const uint8_t *p = data + 1;
+    size_t remaining = data_len - 1;
+
+    bool is_png = false;
+    bool is_jpeg = false;
+
+    if (id_len == 4) {
+        /* ID3v2.3/v2.4: MIME type is a null-terminated string */
+        const uint8_t *mime_end = memchr(p, '\0', remaining);
+        if (!mime_end) return false;
+        size_t mime_len = mime_end - p;
+
+        is_png  = (mime_len == 9  && memcmp(p, "image/png",  9) == 0);
+        is_jpeg = (mime_len == 10 && memcmp(p, "image/jpeg", 10) == 0) ||
+                  (mime_len == 9  && memcmp(p, "image/jpg",  9) == 0);
+
+        remaining -= (mime_len + 1);
+        p = mime_end + 1;
+    } else {
+        /* ID3v2.2: 3-byte image format (e.g. "JPG", "PNG") */
+        if (remaining < 3) return false;
+        is_png  = (memcmp(p, "PNG", 3) == 0);
+        is_jpeg = (memcmp(p, "JPG", 3) == 0);
+        p += 3; remaining -= 3;
+    }
+
+    if (!is_png && !is_jpeg) return false;
+    if (remaining < 2) return false;
+
+    /* Skip picture type byte */
+    p++; remaining--;
+
+    /* Skip description (null-terminated) */
+    const uint8_t *desc_end = memchr(p, '\0', remaining);
+    if (!desc_end) return false;
+    size_t desc_len = desc_end - p;
+    p = desc_end + 1;
+    remaining -= (desc_len + 1);
+
+    if (remaining < 8) return false;
+
+    ensure_cache_dir();
+    const char *tmp_path = is_png ? COVER_ART_TEMP_PATH_PNG : COVER_ART_TEMP_PATH_JPG;
+    FILE *tmp = fopen(tmp_path, "wb");
+    if (!tmp) return false;
+
+    size_t written = fwrite(p, 1, remaining, tmp);
+    fclose(tmp);
+
+    if (written != remaining) {
+        remove(tmp_path);
+        return false;
+    }
+
+    meta->has_cover_art = true;
+    strncpy(meta->cover_art_path, tmp_path, sizeof(meta->cover_art_path) - 1);
+    meta->cover_art_path[sizeof(meta->cover_art_path) - 1] = '\0';
+    return true;
+}
+
 static bool parse_id3v2(const uint8_t *buf, size_t buf_size, id3_metadata_t *meta) {
     if (buf_size < 10 || memcmp(buf, "ID3", 3) != 0) return false;
 
@@ -294,6 +376,8 @@ static bool parse_id3v2(const uint8_t *buf, size_t buf_size, id3_metadata_t *met
             char tmp[16];
             decode_text_frame(data, data_len, tmp, sizeof(tmp));
             meta->track_number = atoi(tmp);
+        } else if (!meta->has_cover_art && is_apic_frame(fhdr, id_len)) {
+            extract_apic(data, data_len, id_len, meta);
         }
 
         pos += frame_size;
@@ -338,4 +422,9 @@ void id3_parse(FILE *f, size_t file_size, id3_metadata_t *meta) {
     }
 
     fseek(f, saved, SEEK_SET);
+}
+
+void id3_free_cover_art(void) {
+    remove(COVER_ART_TEMP_PATH_PNG);
+    remove(COVER_ART_TEMP_PATH_JPG);
 }

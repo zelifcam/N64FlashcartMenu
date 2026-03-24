@@ -185,6 +185,7 @@ mp3player_err_t mp3player_init (void) {
  */
 void mp3player_deinit (void) {
     mp3player_unload();
+    id3_free_cover_art();
     free(p);
     p = NULL;
 }

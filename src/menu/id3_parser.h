@@ -23,7 +23,12 @@ typedef struct {
     char album[ID3_FIELD_MAX];
     int track_number;
     bool has_metadata;
+    bool has_cover_art;
+    char cover_art_path[256];
 } id3_metadata_t;
+
+/** @brief Remove any cover art temp files from the SD card. */
+void id3_free_cover_art(void);
 
 /**
  * @brief Parse ID3 metadata from an open MP3 file.
