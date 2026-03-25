@@ -67,8 +67,6 @@ static int shuffle_pos = 0;
 /* Cover art state */
 static bool cover_art_expected = false;
 static bool cover_first_load = true;
-static bool logo_blocks_built = false;
-static int logo_frame = 0;
 static char cover_art_source[256] = "";  /* path of currently loaded art */
 
 typedef enum {
@@ -1035,18 +1033,11 @@ static void draw (menu_t *menu, surface_t *d) {
         });
         rdpq_mode_pop();
     } else if (cover_art_expected && art_size > 0 && cover_first_load) {
-        /* First load: show animated N64 logo as placeholder */
-        logo_frame++;
-
-        /* Art arrived, switch from logo to image */
+        /* Art arrived, switch from placeholder to image */
         if (cover_image) {
             cover_first_load = false;
         } else {
-            if (logo_blocks_built) {
-                ui_components_n64_logo_draw(logo_frame);
-            }
-
-            /* "Loading..." text centered below the logo */
+            /* "Loading..." text centered in art area */
             const char *loading_text = "Loading...";
             rdpq_text_printn(
                 &(rdpq_textparms_t) {
@@ -1055,7 +1046,7 @@ static void draw (menu_t *menu, surface_t *d) {
                     .align = ALIGN_CENTER,
                 },
                 FNT_DEFAULT,
-                art_x, art_y + art_size / 2 + art_size / 4 + 20,
+                art_x, art_y + art_size / 2,
                 loading_text, strlen(loading_text)
             );
         }
@@ -1175,10 +1166,6 @@ static void deinit (void) {
     cover_art_expected = false;
     cover_first_load = true;
     cover_art_source[0] = '\0';
-    if (logo_blocks_built) {
-        ui_components_n64_logo_free();
-        logo_blocks_built = false;
-    }
     if (cover_dir) {
         path_free(cover_dir);
         cover_dir = NULL;
@@ -1198,17 +1185,16 @@ static void deinit (void) {
 }
 
 
-/** Draw the loading screen (logo animation centered on black background). */
-/* Progress weights per loading step (0-6 + default).
- * Caps at 95% so the bar never sits at 100% waiting. */
+/** Draw the loading screen with progress bar. */
+/* Progress weights per loading step. Caps at 95% so the bar
+ * never sits at 100% waiting for async cover art decode. */
 static const float loading_progress[] = {
-    0.00f,  /* step 0: init */
-    0.05f,  /* step 1: mp3player_init */
-    0.30f,  /* step 2: mp3player_load */
-    0.45f,  /* step 3: build music index */
-    0.60f,  /* step 4: sound init */
-    0.75f,  /* step 5: cover art */
-    0.85f,  /* step 6: preload next */
+    0.00f,  /* step 0: mp3player_init */
+    0.15f,  /* step 1: mp3player_load */
+    0.40f,  /* step 2: build music index */
+    0.60f,  /* step 3: sound init */
+    0.75f,  /* step 4: cover art */
+    0.85f,  /* step 5: preload next */
     0.95f,  /* done, transitions immediately */
 };
 
@@ -1219,7 +1205,7 @@ static void draw_loading_screen (surface_t *d) {
     ui_components_layout_draw();
 
     int idx = loading_step;
-    if (idx > 7) idx = 7;
+    if (idx > 6) idx = 6;
     ui_components_loader_draw(loading_progress[idx], "Loading...");
 
     rdpq_detach_show();
@@ -1229,20 +1215,6 @@ static void draw_loading_screen (surface_t *d) {
 static bool loading_tick (menu_t *menu) {
     switch (loading_step) {
         case 0: {
-            /* Step 0: Build N64 logo blocks for cover art placeholder */
-            if (logo_blocks_built) {
-                ui_components_n64_logo_free();
-            }
-            int ct = VISIBLE_AREA_Y0 + CONTENT_TOP_OFFSET;
-            int cb = SEEKBAR_Y - BORDER_THICKNESS - CONTENT_BOTTOM_PAD;
-            int ch = cb - ct;
-            int logo_s = COVER_ART_MAX_SIZE / 2;
-            ui_components_n64_logo_init(DISPLAY_CENTER_X, ct + ch / 2, logo_s);
-            logo_blocks_built = true;
-            loading_step++;
-            return false;
-        }
-        case 1: {
             mp3player_err_t err = mp3player_init();
             if (err != MP3PLAYER_OK) {
                 menu_show_error(menu, convert_error_message(err));
@@ -1252,7 +1224,7 @@ static bool loading_tick (menu_t *menu) {
             loading_step++;
             return false;
         }
-        case 2: {
+        case 1: {
             path_t *path = path_clone_push(menu->browser.directory, menu->browser.entry->name);
             mp3player_err_t err = mp3player_load(path_get(path));
             path_free(path);
@@ -1264,24 +1236,24 @@ static bool loading_tick (menu_t *menu) {
             loading_step++;
             return false;
         }
-        case 3: {
+        case 2: {
             build_music_index_map(menu);
             loading_step++;
             return false;
         }
-        case 4: {
+        case 3: {
             sound_init_mp3_playback();
             mp3player_mute(false);
             loading_step++;
             return false;
         }
-        case 5: {
+        case 4: {
             load_cover_art(menu->browser.directory);
             loading_step++;
             return false;
         }
-        case 6: {
-            /* Step 6: Preload next track (after cover art decode starts).
+        case 5: {
+            /* Preload next track (after cover art decode starts).
              * Must wait until cover art file is no longer being read,
              * because preload's id3_parse can overwrite the temp file. */
             bool art_reading = (cover_state == COVER_LOADING_JPEG || cover_state == COVER_LOADING_PNG);
