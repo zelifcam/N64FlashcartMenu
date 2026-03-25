@@ -32,6 +32,14 @@
 #define SEEK_PREDECODE_FRAMES   (5)
 #define FLAC_READ_SAMPLES       (1152)  /* samples per wave_read iteration */
 
+/* Guard debug output behind the same flag used in music_player.c.
+ * Compiles to nothing in release builds. */
+#ifdef MP3_PLAYER_DEBUG
+#define player_debugf(...) debugf(__VA_ARGS__)
+#else
+#define player_debugf(...) ((void)0)
+#endif
+
 typedef enum {
     AUDIO_FORMAT_MP3,
     AUDIO_FORMAT_FLAC,
@@ -72,8 +80,9 @@ typedef struct {
     drflac *flac;
     drflac_uint64 total_pcm_frames;
     drflac_uint64 current_pcm_frame;
-    int downsample;  /* 1 = native, 2 = halve, 4 = quarter, etc. */
-    char *filebuf;   /* stdio buffer for FLAC, reduces SD card round-trips */
+    int downsample;    /* 1 = native, 2 = halve, 4 = quarter, etc. */
+    int native_rate;   /* original sample rate before downsampling */
+    char *filebuf;     /* stdio buffer for FLAC, reduces SD card round-trips */
 } audio_track_t;
 
 /** @brief Player state with current + preloaded next track. */
@@ -281,7 +290,7 @@ static mp3player_err_t track_load_flac (audio_track_t *t) {
     /* Verify FLAC magic bytes */
     uint8_t magic[4];
     if (fread(magic, 1, 4, t->f) != 4 || memcmp(magic, "fLaC", 4) != 0) {
-        debugf("[FLAC] not a FLAC file (magic: %02x %02x %02x %02x)\n",
+        player_debugf("[FLAC] not a FLAC file (magic: %02x %02x %02x %02x)\n",
                magic[0], magic[1], magic[2], magic[3]);
         fclose(t->f);
         t->f = NULL;
@@ -300,12 +309,12 @@ static mp3player_err_t track_load_flac (audio_track_t *t) {
     t->flac_io->f = t->f;
     t->flac_io->meta = &t->metadata;
 
-    debugf("[FLAC] opening with dr_flac (file_size=%lu)\n", (unsigned long)t->file_size);
+    player_debugf("[FLAC] opening with dr_flac (file_size=%lu)\n", (unsigned long)t->file_size);
     t->flac = drflac_open_with_metadata(drflac_read_cb, drflac_seek_cb,
                                          drflac_tell_cb, flac_metadata_callback,
                                          t->flac_io, NULL);
     if (!t->flac) {
-        debugf("[FLAC] drflac_open failed\n");
+        player_debugf("[FLAC] drflac_open failed\n");
         free(t->flac_io);
         t->flac_io = NULL;
         fclose(t->f);
@@ -313,13 +322,13 @@ static mp3player_err_t track_load_flac (audio_track_t *t) {
         return MP3PLAYER_ERR_INVALID_FILE;
     }
 
-    debugf("[FLAC] opened: %d ch, %d Hz, %llu frames\n",
+    player_debugf("[FLAC] opened: %d ch, %d Hz, %llu frames\n",
            t->flac->channels, t->flac->sampleRate,
            (unsigned long long)t->flac->totalPCMFrameCount);
 
     /* Reject unsupported channel counts */
     if (t->flac->channels > 2) {
-        debugf("[FLAC] rejected: channels=%d (max 2)\n", t->flac->channels);
+        player_debugf("[FLAC] rejected: channels=%d (max 2)\n", t->flac->channels);
         drflac_close(t->flac);
         t->flac = NULL;
         free(t->flac_io);
@@ -329,27 +338,27 @@ static mp3player_err_t track_load_flac (audio_track_t *t) {
         return MP3PLAYER_ERR_INVALID_FILE;
     }
 
-    /* Downsample hi-res audio to a rate the mixer can handle.
-     * 192kHz -> 48kHz (factor 4), 96kHz -> 48kHz (factor 2), etc. */
+    /* Downsample hi-res audio to keep SD card reads manageable.
+     * 192kHz at native rate reads 4x more data per second than needed. */
+    t->native_rate = t->flac->sampleRate;
     t->downsample = 1;
-    int native_rate = t->flac->sampleRate;
-    while (native_rate / t->downsample > 48000 && t->downsample < 8) {
+    while (t->native_rate / t->downsample > 96000 && t->downsample < 8) {
         t->downsample *= 2;
     }
 
     t->loaded = true;
     t->channels = t->flac->channels;
-    t->samplerate = native_rate / t->downsample;
+    t->samplerate = t->native_rate / t->downsample;
     t->total_pcm_frames = t->flac->totalPCMFrameCount;
     t->current_pcm_frame = 0;
 
-    if (native_rate > 0 && t->total_pcm_frames > 0) {
-        t->duration = (float)t->total_pcm_frames / (float)native_rate;
+    if (t->native_rate > 0 && t->total_pcm_frames > 0) {
+        t->duration = (float)t->total_pcm_frames / (float)t->native_rate;
         t->bitrate = (t->file_size * 8.0f) / t->duration;
     }
 
-    debugf("[FLAC] playback: %dHz (native %dHz, downsample %dx), duration %.1fs\n",
-           t->samplerate, native_rate, t->downsample, t->duration);
+    player_debugf("[FLAC] playback: %dHz (native %dHz, downsample %dx), duration %.1fs\n",
+           t->samplerate, t->native_rate, t->downsample, t->duration);
 
     t->metadata.has_metadata = (t->metadata.title[0] || t->metadata.artist[0] || t->metadata.album[0]);
 
@@ -436,16 +445,31 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
 
             if (frames_read > 0) {
                 int out_frames = frames_read / t->downsample;
-                if (out_frames < 1) out_frames = 1;
+                if (out_frames < 1) {
+                    /* Not enough frames to produce output, skip */
+                    t->current_pcm_frame += frames_read;
+                    continue;
+                }
                 short *out = (short *)(samplebuffer_append(sbuf, out_frames));
 
                 if (t->downsample == 1) {
                     memcpy(out, pcm_buf, out_frames * t->channels * sizeof(int16_t));
                 } else {
-                    /* Simple decimation: pick every Nth frame */
-                    for (int i = 0; i < out_frames; i++) {
-                        for (int ch = 0; ch < t->channels; ch++) {
-                            out[i * t->channels + ch] = pcm_buf[i * t->downsample * t->channels + ch];
+                    /* Decimation: pick every Nth frame. Use pointer stride
+                     * instead of multiply-per-sample to reduce ALU work. */
+                    int stride = t->downsample * t->channels;
+                    int16_t *src = pcm_buf;
+                    if (t->channels == 2) {
+                        for (int i = 0; i < out_frames; i++) {
+                            out[0] = src[0];
+                            out[1] = src[1];
+                            out += 2;
+                            src += stride;
+                        }
+                    } else {
+                        for (int i = 0; i < out_frames; i++) {
+                            *out++ = *src;
+                            src += stride;
                         }
                     }
                 }
@@ -660,8 +684,7 @@ mp3player_err_t mp3player_seek (int seconds) {
         bool was_playing = mp3player_is_playing();
         if (was_playing) mixer_ch_stop(SOUND_MP3_PLAYER_CHANNEL);
 
-        int native_rate = p->current.samplerate * p->current.downsample;
-        drflac_int64 frame_offset = (drflac_int64)seconds * native_rate;
+        drflac_int64 frame_offset = (drflac_int64)seconds * p->current.native_rate;
         drflac_int64 target = (drflac_int64)p->current.current_pcm_frame + frame_offset;
         if (target < 0) target = 0;
         if (target > (drflac_int64)p->current.total_pcm_frames) {
@@ -683,6 +706,9 @@ mp3player_err_t mp3player_seek (int seconds) {
     long position = (ftell(p->current.f) - p->current.buffer_left + bytes_to_move);
     if (position < (long)(p->current.data_start)) {
         position = p->current.data_start;
+    }
+    if (position > (long)(p->current.file_size)) {
+        position = p->current.file_size;
     }
 
     if (fseek(p->current.f, position, SEEK_SET)) {
@@ -716,8 +742,8 @@ int mp3player_get_samplerate (void) {
 
 int mp3player_get_native_samplerate (void) {
     if (!p->current.loaded) return 0;
-    if (p->current.format == AUDIO_FORMAT_FLAC && p->current.downsample > 1) {
-        return p->current.samplerate * p->current.downsample;
+    if (p->current.format == AUDIO_FORMAT_FLAC && p->current.native_rate > 0) {
+        return p->current.native_rate;
     }
     return p->current.samplerate;
 }

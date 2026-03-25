@@ -57,12 +57,6 @@ typedef enum {
 
 static player_state_t player_state = PLAYER_LOADING;
 static int loading_step = 0;
-#ifdef MP3_PLAYER_DEBUG
-static uint32_t load_start_ticks = 0;
-static unsigned long load_ms (void) {
-    return TICKS_DISTANCE(load_start_ticks, TICKS_READ()) / (TICKS_PER_SECOND / 1000);
-}
-#endif
 
 static playback_mode_t playback_mode = PLAYBACK_NORMAL;
 static bool advance_failed = false;
@@ -256,7 +250,6 @@ static bool png_dimensions_ok (const char *path, int max_dim) {
 static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
     cover_state = COVER_IDLE;
     if (err == JPEG_OK && image) {
-        mp3_debugf("[COVER] %lums: JPEG decode OK: %dx%d\n", load_ms(), image->width, image->height);
         if (cover_image) {
             surface_free(cover_image);
             free(cover_image);
@@ -264,7 +257,7 @@ static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
         cover_image = image;
         cover_cache_blit_params();
     } else {
-        mp3_debugf("[COVER] %lums: JPEG decode FAILED (err %d), trying next\n", load_ms(), err);
+        mp3_debugf("[COVER] JPEG decode failed (err %d)\n", err);
         try_next_cover_source();
     }
 }
@@ -272,7 +265,6 @@ static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
 static void cover_art_png_callback (png_err_t err, surface_t *image, void *data) {
     cover_state = COVER_IDLE;
     if (err == PNG_OK && image) {
-        mp3_debugf("[COVER] %lums: PNG decode OK: %dx%d\n", load_ms(), image->width, image->height);
         if (cover_image) {
             surface_free(cover_image);
             free(cover_image);
@@ -280,23 +272,21 @@ static void cover_art_png_callback (png_err_t err, surface_t *image, void *data)
         cover_image = image;
         cover_cache_blit_params();
     } else {
-        mp3_debugf("[COVER] %lums: PNG decode FAILED (err %d)\n", load_ms(), err);
+        mp3_debugf("[COVER] PNG decode failed (err %d)\n", err);
 
         /* If a .png temp file failed, the APIC data might actually be JPEG.
          * Try decoding as JPEG before giving up. */
         const id3_metadata_t *meta = mp3player_get_metadata();
         if (meta->has_cover_art && meta->cover_art_path[0]) {
-            mp3_debugf("[COVER] %lums: retrying embedded art as JPEG\n", load_ms());
             int max_size = cover_art_budget_size();
             cover_state = COVER_LOADING_JPEG;
             jpeg_err_t jerr = jpeg_decoder_start((char *)meta->cover_art_path, max_size, max_size,
                                                   (jpeg_callback_t *)cover_art_callback, NULL);
             if (jerr == JPEG_OK) {
-                mp3_debugf("[COVER] %lums: JPEG fallback decode started\n", load_ms());
                 return;
             }
             cover_state = COVER_IDLE;
-            mp3_debugf("[COVER] %lums: JPEG fallback also failed (err %d)\n", load_ms(), jerr);
+            mp3_debugf("[COVER] JPEG fallback failed (err %d)\n", jerr);
         }
 
         try_next_cover_source();
@@ -310,21 +300,17 @@ static bool try_cover_path (const char *path, int max_size) {
     ext++;
 
     if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) {
-        mp3_debugf("[COVER] %lums: trying JPEG: %s (max %d)\n", load_ms(), path, max_size);
         cover_state = COVER_LOADING_JPEG;
         jpeg_err_t err = jpeg_decoder_start((char *)path, max_size, max_size,
                                             (jpeg_callback_t *)cover_art_callback, NULL);
         if (err != JPEG_OK) {
             cover_state = COVER_IDLE;
-            mp3_debugf("[COVER] %lums: JPEG start FAILED: %s (err %d)\n", load_ms(), path, err);
+            mp3_debugf("[COVER] JPEG start failed: %s (err %d)\n", path, err);
             return false;
         }
-        mp3_debugf("[COVER] %lums: JPEG decode started\n", load_ms());
         return true;
     } else if (strcasecmp(ext, "png") == 0) {
-        mp3_debugf("[COVER] %lums: trying PNG: %s (max %d)\n", load_ms(), path, max_size);
         if (!png_dimensions_ok(path, max_size)) {
-            mp3_debugf("[COVER] %lums: PNG too large, skipping: %s\n", load_ms(), path);
             return false;
         }
         cover_state = COVER_LOADING_PNG;
@@ -332,10 +318,9 @@ static bool try_cover_path (const char *path, int max_size) {
                                           cover_art_png_callback, NULL);
         if (err != PNG_OK) {
             cover_state = COVER_IDLE;
-            mp3_debugf("[COVER] %lums: PNG start FAILED: %s (err %d)\n", load_ms(), path, err);
+            mp3_debugf("[COVER] PNG start failed: %s (err %d)\n", path, err);
             return false;
         }
-        mp3_debugf("[COVER] %lums: PNG decode started\n", load_ms());
         return true;
     }
     return false;
@@ -412,11 +397,8 @@ static void find_cover_art_source (path_t *directory, char *out_path, size_t out
     out_path[0] = '\0';
 
     const id3_metadata_t *meta = mp3player_get_metadata();
-    mp3_debugf("[COVER] %lums: find_source: has_cover_art=%d has_metadata=%d dir='%s'\n",
-           load_ms(), meta->has_cover_art, meta->has_metadata, path_get(directory));
 
     if (meta->has_cover_art && meta->cover_art_path[0]) {
-        mp3_debugf("[COVER] %lums: find_source: embedded art at '%s'\n", load_ms(), meta->cover_art_path);
         strncpy(out_path, meta->cover_art_path, out_size - 1);
         out_path[out_size - 1] = '\0';
         return;
@@ -470,11 +452,11 @@ static void load_cover_art (path_t *directory) {
                  (unsigned long)meta_src->cover_art_size);
     }
 
-    mp3_debugf("[COVER] %lums: source key: '%s'\n", load_ms(), new_source[0] ? new_source : "(none)");
+    mp3_debugf("[COVER] source: '%s'\n", new_source[0] ? new_source : "(none)");
 
     /* If same source as current and we already have an image, skip reload */
     if (cover_image && new_source[0] && strcmp(new_source, cover_art_source) == 0) {
-        mp3_debugf("[COVER] %lums: same source as current, skipping reload\n", load_ms());
+        mp3_debugf("[COVER] same source, skip reload\n");
         return;
     }
 
@@ -1273,8 +1255,6 @@ static bool loading_tick (menu_t *menu) {
             return false;
         }
         case 1: {
-            /* Step 1: Init MP3 player */
-            mp3_debugf("[LOAD] %lums: step 1: mp3player_init\n", load_ms());
             mp3player_err_t err = mp3player_init();
             if (err != MP3PLAYER_OK) {
                 menu_show_error(menu, convert_error_message(err));
@@ -1285,8 +1265,6 @@ static bool loading_tick (menu_t *menu) {
             return false;
         }
         case 2: {
-            /* Step 2: Load the track (don't play yet) */
-            mp3_debugf("[LOAD] %lums: step 2: mp3player_load '%s'\n", load_ms(), menu->browser.entry->name);
             path_t *path = path_clone_push(menu->browser.directory, menu->browser.entry->name);
             mp3player_err_t err = mp3player_load(path_get(path));
             path_free(path);
@@ -1299,23 +1277,17 @@ static bool loading_tick (menu_t *menu) {
             return false;
         }
         case 3: {
-            /* Step 3: Build music index map */
-            mp3_debugf("[LOAD] %lums: step 3: build music index map (%ld entries)\n", load_ms(), (long)menu->browser.entries);
             build_music_index_map(menu);
             loading_step++;
             return false;
         }
         case 4: {
-            /* Step 4: Configure audio subsystem (no audible output yet) */
-            mp3_debugf("[LOAD] %lums: step 4: sound_init_mp3_playback\n", load_ms());
             sound_init_mp3_playback();
             mp3player_mute(false);
             loading_step++;
             return false;
         }
         case 5: {
-            /* Step 5: Start cover art decode */
-            mp3_debugf("[LOAD] %lums: step 5: load_cover_art\n", load_ms());
             load_cover_art(menu->browser.directory);
             loading_step++;
             return false;
@@ -1326,7 +1298,6 @@ static bool loading_tick (menu_t *menu) {
              * because preload's id3_parse can overwrite the temp file. */
             bool art_reading = (cover_state == COVER_LOADING_JPEG || cover_state == COVER_LOADING_PNG);
             if (!art_reading) {
-                mp3_debugf("[LOAD] %lums: step 6: preload_next_track\n", load_ms());
                 preload_next_track(menu);
                 loading_step++;
             }
@@ -1343,11 +1314,6 @@ static bool loading_tick (menu_t *menu) {
 void view_music_player_init (menu_t *menu) {
     player_state = PLAYER_LOADING;
     loading_step = 0;
-#ifdef MP3_PLAYER_DEBUG
-    load_start_ticks = TICKS_READ();
-#endif
-    mp3_debugf("[LOAD] %lums: init started\n", 0UL);
-
     playback_mode = PLAYBACK_NORMAL;
     advance_failed = false;
 
@@ -1378,10 +1344,10 @@ void view_music_player_display (menu_t *menu, surface_t *display) {
         draw_loading_screen(display);
 
         if (done) {
-            mp3_debugf("[LOAD] %lums: transition to PLAYER_READY\n", load_ms());
+            mp3_debugf("[LOAD] player ready\n");
             mp3player_err_t play_err = mp3player_play();
             if (play_err != MP3PLAYER_OK) {
-                mp3_debugf("[LOAD] %lums: mp3player_play failed: %d\n", load_ms(), play_err);
+                mp3_debugf("[LOAD] play failed: %d\n", play_err);
                 menu_show_error(menu, convert_error_message(play_err));
             }
             player_state = PLAYER_READY;
