@@ -1229,16 +1229,28 @@ static void deinit (void) {
 
 
 /** Draw the loading screen (logo animation centered on black background). */
+/* Progress weights per loading step (0-6 + default).
+ * Caps at 95% so the bar never sits at 100% waiting. */
+static const float loading_progress[] = {
+    0.00f,  /* step 0: init */
+    0.05f,  /* step 1: mp3player_init */
+    0.30f,  /* step 2: mp3player_load */
+    0.45f,  /* step 3: build music index */
+    0.60f,  /* step 4: sound init */
+    0.75f,  /* step 5: cover art */
+    0.85f,  /* step 6: preload next */
+    0.95f,  /* done, transitions immediately */
+};
+
 static void draw_loading_screen (surface_t *d) {
     rdpq_attach(d, NULL);
 
     ui_components_background_draw();
     ui_components_layout_draw();
 
-    if (logo_blocks_built) {
-        logo_frame++;
-        ui_components_n64_logo_draw(logo_frame);
-    }
+    int idx = loading_step;
+    if (idx > 7) idx = 7;
+    ui_components_loader_draw(loading_progress[idx], "Loading...");
 
     rdpq_detach_show();
 }
@@ -1247,8 +1259,7 @@ static void draw_loading_screen (surface_t *d) {
 static bool loading_tick (menu_t *menu) {
     switch (loading_step) {
         case 0: {
-            /* Step 0: Build logo blocks centered on screen */
-            mp3_debugf("[LOAD] %lums: step 0: build logo blocks\n", load_ms());
+            /* Step 0: Build N64 logo blocks for cover art placeholder */
             if (logo_blocks_built) {
                 ui_components_n64_logo_free();
             }
@@ -1258,7 +1269,6 @@ static bool loading_tick (menu_t *menu) {
             int logo_s = COVER_ART_MAX_SIZE / 2;
             ui_components_n64_logo_init(DISPLAY_CENTER_X, ct + ch / 2, logo_s);
             logo_blocks_built = true;
-            mp3_debugf("[LOAD] %lums: step 0: done\n", load_ms());
             loading_step++;
             return false;
         }
@@ -1333,7 +1343,6 @@ static bool loading_tick (menu_t *menu) {
 void view_music_player_init (menu_t *menu) {
     player_state = PLAYER_LOADING;
     loading_step = 0;
-    logo_frame = 0;
 #ifdef MP3_PLAYER_DEBUG
     load_start_ticks = TICKS_READ();
 #endif
