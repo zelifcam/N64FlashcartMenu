@@ -257,7 +257,7 @@ static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
         cover_image = image;
         cover_cache_blit_params();
     } else {
-        mp3_debugf("[COVER] JPEG decode failed (err %d)\n", err);
+
         try_next_cover_source();
     }
 }
@@ -272,7 +272,7 @@ static void cover_art_png_callback (png_err_t err, surface_t *image, void *data)
         cover_image = image;
         cover_cache_blit_params();
     } else {
-        mp3_debugf("[COVER] PNG decode failed (err %d)\n", err);
+
 
         /* If a .png temp file failed, the APIC data might actually be JPEG.
          * Try decoding as JPEG before giving up. */
@@ -286,7 +286,7 @@ static void cover_art_png_callback (png_err_t err, surface_t *image, void *data)
                 return;
             }
             cover_state = COVER_IDLE;
-            mp3_debugf("[COVER] JPEG fallback failed (err %d)\n", jerr);
+
         }
 
         try_next_cover_source();
@@ -305,7 +305,7 @@ static bool try_cover_path (const char *path, int max_size) {
                                             (jpeg_callback_t *)cover_art_callback, NULL);
         if (err != JPEG_OK) {
             cover_state = COVER_IDLE;
-            mp3_debugf("[COVER] JPEG start failed: %s (err %d)\n", path, err);
+
             return false;
         }
         return true;
@@ -318,7 +318,7 @@ static bool try_cover_path (const char *path, int max_size) {
                                           cover_art_png_callback, NULL);
         if (err != PNG_OK) {
             cover_state = COVER_IDLE;
-            mp3_debugf("[COVER] PNG start failed: %s (err %d)\n", path, err);
+
             return false;
         }
         return true;
@@ -452,11 +452,11 @@ static void load_cover_art (path_t *directory) {
                  (unsigned long)meta_src->cover_art_size);
     }
 
-    mp3_debugf("[COVER] source: '%s'\n", new_source[0] ? new_source : "(none)");
+
 
     /* If same source as current and we already have an image, skip reload */
     if (cover_image && new_source[0] && strcmp(new_source, cover_art_source) == 0) {
-        mp3_debugf("[COVER] same source, skip reload\n");
+
         return;
     }
 
@@ -920,19 +920,21 @@ static void draw (menu_t *menu, surface_t *d) {
         }
     }
 
-    /* Hz / kbps line below the ticker, gray and centered */
+    /* Hz / kbps / format line below the ticker, gray and centered */
     {
         char tech_str[64];
         int native_rate = mp3player_get_native_samplerate();
         int playback_rate = mp3player_get_samplerate();
+        const char *ext = strrchr(menu->browser.entry->name, '.');
+        const char *fmt = (ext && strcasecmp(ext, ".flac") == 0) ? "FLAC" : "MP3";
         if (native_rate > playback_rate) {
-            snprintf(tech_str, sizeof(tech_str), "%dHz (%dHz) \xC2\xB7 %.0fkbps",
+            snprintf(tech_str, sizeof(tech_str), "%dHz (%dHz) \xC2\xB7 %.0fkbps \xC2\xB7 %s",
                      playback_rate, native_rate,
-                     (double)(mp3player_get_bitrate() / 1000));
+                     (double)(mp3player_get_bitrate() / 1000), fmt);
         } else {
-            snprintf(tech_str, sizeof(tech_str), "%dHz \xC2\xB7 %.0fkbps",
+            snprintf(tech_str, sizeof(tech_str), "%dHz \xC2\xB7 %.0fkbps \xC2\xB7 %s",
                      playback_rate,
-                     (double)(mp3player_get_bitrate() / 1000));
+                     (double)(mp3player_get_bitrate() / 1000), fmt);
         }
         int tech_y = ticker_y + HEADER_LINE_SPACING;
         rdpq_text_printn(
@@ -1019,7 +1021,12 @@ static void draw (menu_t *menu, surface_t *d) {
     int visible_queue_h = (window_end - window_start) * QUEUE_LINE_HEIGHT;
 
     if (art_size > 0) {
-        queue_y = art_y + HEADER_BASELINE_OFFSET;
+        if (visible_queue_h < art_size) {
+            /* Fewer tracks than art height: center vertically beside art */
+            queue_y = art_y + (art_size - visible_queue_h) / 2 + HEADER_BASELINE_OFFSET;
+        } else {
+            queue_y = art_y + HEADER_BASELINE_OFFSET;
+        }
     } else {
         queue_y = content_top + (content_h - visible_queue_h) / 2;
     }

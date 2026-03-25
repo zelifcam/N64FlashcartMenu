@@ -631,7 +631,22 @@ bool mp3player_is_playing (void) {
 
 bool mp3player_is_finished (void) {
     if (!p->current.loaded) return false;
-    return track_is_finished(&p->current) && !p->next_ready;
+    if (track_is_finished(&p->current) && !p->next_ready) return true;
+
+    /* Track finished but the mixer stopped before wave_read could do
+     * the track crossover. Swap manually and restart playback. */
+    if (track_is_finished(&p->current) && p->next_ready && !mp3player_is_playing()) {
+        track_unload(&p->current);
+        memcpy(&p->current, &p->next, sizeof(audio_track_t));
+        memset(&p->next, 0, sizeof(audio_track_t));
+        p->next_ready = false;
+        p->track_advanced = true;
+
+        p->wave.channels = p->current.channels;
+        p->wave.frequency = p->current.samplerate;
+        mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
+    }
+    return false;
 }
 
 mp3player_err_t mp3player_play (void) {
