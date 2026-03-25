@@ -50,6 +50,7 @@ typedef enum {
 typedef struct {
     FILE *f;
     id3_metadata_t *meta;
+    int flags;  /* ID3_FLAG_* controls art extraction */
 } flac_io_t;
 
 /** @brief Per-track file and decoder state. */
@@ -159,6 +160,41 @@ static void flac_metadata_callback (void *userdata, drflac_metadata *metadata) {
             flac_parse_vorbis_comment(buf, meta);
         }
         meta->has_metadata = (meta->title[0] || meta->artist[0] || meta->album[0]);
+    }
+
+    /* Extract embedded cover art (PICTURE block, type 3 = front cover) */
+    if (metadata->type == DRFLAC_METADATA_BLOCK_TYPE_PICTURE &&
+        (io->flags & ID3_FLAG_EXTRACT_ART) && !meta->has_cover_art) {
+        drflac_uint32 pic_type = metadata->data.picture.type;
+        drflac_uint32 pic_size = metadata->data.picture.pictureDataSize;
+        const void  *pic_data = metadata->data.picture.pPictureData;
+
+        /* Accept front cover (3), or any type if no front cover found */
+        if (pic_data && pic_size > 0 &&
+            (pic_type == DRFLAC_PICTURE_TYPE_COVER_FRONT || pic_type == DRFLAC_PICTURE_TYPE_OTHER)) {
+
+            /* Determine extension from MIME type */
+            const char *ext = "jpg";
+            if (metadata->data.picture.mime &&
+                strstr(metadata->data.picture.mime, "png")) {
+                ext = "png";
+            }
+
+            /* Write to temp file, same path convention as ID3 APIC */
+            char tmp_path[256];
+            snprintf(tmp_path, sizeof(tmp_path), "sd:/menu/cache/cover_tmp.%s", ext);
+            mkdir("sd:/menu/cache", 0755);
+
+            FILE *out = fopen(tmp_path, "wb");
+            if (out) {
+                fwrite(pic_data, 1, pic_size, out);
+                fclose(out);
+                strncpy(meta->cover_art_path, tmp_path, sizeof(meta->cover_art_path) - 1);
+                meta->cover_art_path[sizeof(meta->cover_art_path) - 1] = '\0';
+                meta->has_cover_art = true;
+                meta->cover_art_size = pic_size;
+            }
+        }
     }
 }
 
@@ -284,7 +320,7 @@ static mp3player_err_t track_load_mp3 (audio_track_t *t, int id3_flags) {
     return MP3PLAYER_ERR_INVALID_FILE;
 }
 
-static mp3player_err_t track_load_flac (audio_track_t *t) {
+static mp3player_err_t track_load_flac (audio_track_t *t, int id3_flags) {
     fseek(t->f, 0, SEEK_SET);
 
     /* Verify FLAC magic bytes */
@@ -308,6 +344,7 @@ static mp3player_err_t track_load_flac (audio_track_t *t) {
     }
     t->flac_io->f = t->f;
     t->flac_io->meta = &t->metadata;
+    t->flac_io->flags = id3_flags;
 
     player_debugf("[FLAC] opening with dr_flac (file_size=%lu)\n", (unsigned long)t->file_size);
     t->flac = drflac_open_with_metadata(drflac_read_cb, drflac_seek_cb,
@@ -395,7 +432,7 @@ static mp3player_err_t track_load (audio_track_t *t, char *path, int id3_flags) 
     t->file_size = st.st_size;
 
     if (t->format == AUDIO_FORMAT_FLAC) {
-        return track_load_flac(t);
+        return track_load_flac(t, id3_flags);
     } else {
         return track_load_mp3(t, id3_flags);
     }
@@ -404,7 +441,11 @@ static mp3player_err_t track_load (audio_track_t *t, char *path, int id3_flags) 
 static bool track_is_finished (audio_track_t *t) {
     if (!t->loaded) return false;
     if (t->format == AUDIO_FORMAT_FLAC) {
-        return t->current_pcm_frame >= t->total_pcm_frames;
+        /* Only report finished after wave_read has had a chance to
+         * attempt the track crossover (frames_read == 0 path).
+         * Check that the mixer is no longer playing. */
+        return t->current_pcm_frame >= t->total_pcm_frames
+            && !mixer_ch_playing(SOUND_MP3_PLAYER_CHANNEL);
     }
     return feof(t->f) && (t->buffer_left == 0);
 }
@@ -618,6 +659,21 @@ mp3player_err_t mp3player_process (void) {
         return MP3PLAYER_ERR_IO;
     }
 
+    /* If the track ended and a preloaded next is waiting but the mixer
+     * already stopped (wave_read never got to do the crossover), swap here. */
+    if (track_is_finished(&p->current) && p->next_ready && !mp3player_is_playing()) {
+        track_unload(&p->current);
+        memcpy(&p->current, &p->next, sizeof(audio_track_t));
+        memset(&p->next, 0, sizeof(audio_track_t));
+        p->next_ready = false;
+        p->track_advanced = true;
+
+        p->wave.channels = p->current.channels;
+        p->wave.frequency = p->current.samplerate;
+        mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
+        return MP3PLAYER_OK;
+    }
+
     if (mp3player_is_finished()) {
         mp3player_stop();
     }
@@ -631,22 +687,7 @@ bool mp3player_is_playing (void) {
 
 bool mp3player_is_finished (void) {
     if (!p->current.loaded) return false;
-    if (track_is_finished(&p->current) && !p->next_ready) return true;
-
-    /* Track finished but the mixer stopped before wave_read could do
-     * the track crossover. Swap manually and restart playback. */
-    if (track_is_finished(&p->current) && p->next_ready && !mp3player_is_playing()) {
-        track_unload(&p->current);
-        memcpy(&p->current, &p->next, sizeof(audio_track_t));
-        memset(&p->next, 0, sizeof(audio_track_t));
-        p->next_ready = false;
-        p->track_advanced = true;
-
-        p->wave.channels = p->current.channels;
-        p->wave.frequency = p->current.samplerate;
-        mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
-    }
-    return false;
+    return track_is_finished(&p->current) && !p->next_ready;
 }
 
 mp3player_err_t mp3player_play (void) {

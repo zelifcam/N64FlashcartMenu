@@ -13,7 +13,6 @@
 #include <setjmp.h>
 #include <libdragon.h>
 #include <jpeglib.h>
-#include <jerror.h>
 #include "jpeg_decoder.h"
 
 #define SCANLINES_PER_POLL  (32)
@@ -112,6 +111,7 @@ jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
     }
 
     decoder->cinfo.dct_method = JDCT_IFAST;
+
     jpeg_start_decompress(&decoder->cinfo);
 
     decoder->src_w = (int)decoder->cinfo.output_width;

@@ -12,14 +12,6 @@
 #include "views.h"
 
 
-/* Uncomment to enable verbose loading/cover art debug output */
-#define MP3_PLAYER_DEBUG
-#ifdef MP3_PLAYER_DEBUG
-#define mp3_debugf(...) debugf(__VA_ARGS__)
-#else
-#define mp3_debugf(...) ((void)0)
-#endif
-
 #define SEEK_SECONDS            (5)
 #define SEEK_SECONDS_FAST       (60)
 #define COVER_ART_MAX_SIZE      (238)
@@ -257,7 +249,6 @@ static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
         cover_image = image;
         cover_cache_blit_params();
     } else {
-
         try_next_cover_source();
     }
 }
@@ -272,8 +263,6 @@ static void cover_art_png_callback (png_err_t err, surface_t *image, void *data)
         cover_image = image;
         cover_cache_blit_params();
     } else {
-
-
         /* If a .png temp file failed, the APIC data might actually be JPEG.
          * Try decoding as JPEG before giving up. */
         const id3_metadata_t *meta = mp3player_get_metadata();
@@ -286,7 +275,6 @@ static void cover_art_png_callback (png_err_t err, surface_t *image, void *data)
                 return;
             }
             cover_state = COVER_IDLE;
-
         }
 
         try_next_cover_source();
@@ -305,7 +293,6 @@ static bool try_cover_path (const char *path, int max_size) {
                                             (jpeg_callback_t *)cover_art_callback, NULL);
         if (err != JPEG_OK) {
             cover_state = COVER_IDLE;
-
             return false;
         }
         return true;
@@ -318,7 +305,6 @@ static bool try_cover_path (const char *path, int max_size) {
                                           cover_art_png_callback, NULL);
         if (err != PNG_OK) {
             cover_state = COVER_IDLE;
-
             return false;
         }
         return true;
@@ -351,13 +337,14 @@ static void try_next_cover_source (void) {
         } else {
             if (dir_findnext(path_get(cover_dir), &cover_dir_entry) != 0) {
                 cover_dir_scan_active = false;
+                if (!cover_image) cover_art_expected = false;
                 return;
             }
         }
     }
 
-    debugf("Cover art scan: gave up after %d failed attempts\n", attempts);
     cover_dir_scan_active = false;
+    if (!cover_image) cover_art_expected = false;
 }
 
 /** Scan the directory for a cover image, preferring known filenames. */
@@ -1351,10 +1338,8 @@ void view_music_player_display (menu_t *menu, surface_t *display) {
         draw_loading_screen(display);
 
         if (done) {
-            mp3_debugf("[LOAD] player ready\n");
             mp3player_err_t play_err = mp3player_play();
             if (play_err != MP3PLAYER_OK) {
-                mp3_debugf("[LOAD] play failed: %d\n", play_err);
                 menu_show_error(menu, convert_error_message(play_err));
             }
             player_state = PLAYER_READY;
