@@ -163,6 +163,16 @@ float mp3player_get_bitrate(void);
 int mp3player_get_samplerate(void);
 
 /**
+ * @brief Get the native sample rate before downsampling.
+ *
+ * For hi-res FLAC files that are downsampled for playback, this returns
+ * the original rate. For MP3 or non-downsampled FLAC, same as get_samplerate.
+ *
+ * @return int Native sample rate in Hz.
+ */
+int mp3player_get_native_samplerate(void);
+
+/**
  * @brief Get the current playback progress.
  * 
  * This function gets the current playback progress of the MP3 file.
@@ -188,6 +198,24 @@ const id3_metadata_t *mp3player_get_metadata(void);
  * @return mp3player_err_t Error code.
  */
 mp3player_err_t mp3player_preload_next(char *path);
+
+/**
+ * @brief Check if the preloaded track matches a given path.
+ *
+ * @param path Path to check against.
+ * @return true if a track is preloaded and its path matches.
+ */
+bool mp3player_preload_matches(char *path);
+
+/**
+ * @brief Swap the preloaded track into the current slot and start playback.
+ *
+ * Stops the current track, promotes preloaded to current, and starts
+ * the mixer. Much faster than mp3player_load for the next track.
+ *
+ * @return mp3player_err_t Error code.
+ */
+mp3player_err_t mp3player_play_preloaded(void);
 
 /**
  * @brief Check if a seamless track advance occurred.

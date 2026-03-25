@@ -69,10 +69,11 @@ static void draw (menu_t *menu, surface_t *d) {
     if (show_oss_lib_info_message) {
         ui_components_messagebox_draw(
             "OSS library software used:\n\n"
+            "\tdr_flac (Public Domain)\n"
             "\tlibdragon (UNLICENSE License)\n"
+            "\tlibjpeg (IJG License)\n"
             "\tlibspng (BSD 2-Clause License)\n"
             "\tmini.c (BSD 2-Clause License)\n"
-            "\tlibjpeg (IJG License)\n"
             "\tminimp3 (CC0 1.0 Universal)\n"
             "\tminiz (MIT License)"
         );

@@ -936,9 +936,17 @@ static void draw (menu_t *menu, surface_t *d) {
     /* Hz / kbps line below the ticker, gray and centered */
     {
         char tech_str[64];
-        snprintf(tech_str, sizeof(tech_str), "%dHz \xC2\xB7 %.0fkbps",
-                 mp3player_get_samplerate(),
-                 (double)(mp3player_get_bitrate() / 1000));
+        int native_rate = mp3player_get_native_samplerate();
+        int playback_rate = mp3player_get_samplerate();
+        if (native_rate > playback_rate) {
+            snprintf(tech_str, sizeof(tech_str), "%dHz (%dHz) \xC2\xB7 %.0fkbps",
+                     playback_rate, native_rate,
+                     (double)(mp3player_get_bitrate() / 1000));
+        } else {
+            snprintf(tech_str, sizeof(tech_str), "%dHz \xC2\xB7 %.0fkbps",
+                     playback_rate,
+                     (double)(mp3player_get_bitrate() / 1000));
+        }
         int tech_y = ticker_y + HEADER_LINE_SPACING;
         rdpq_text_printn(
             &(rdpq_textparms_t) {
