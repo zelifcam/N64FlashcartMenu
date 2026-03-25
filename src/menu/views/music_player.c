@@ -66,6 +66,7 @@ static unsigned long load_ms (void) {
 
 static playback_mode_t playback_mode = PLAYBACK_NORMAL;
 static bool advance_failed = false;
+static bool seek_busy = false;  /* one seek per frame, prevents cascade */
 static float ticker_offset = 0.0f;
 
 #define QUEUE_LINE_HEIGHT   (16)
@@ -726,6 +727,9 @@ static bool try_skip_track (menu_t *menu, int direction) {
 static void process (menu_t *menu) {
     mp3player_err_t err;
 
+    /* Allow one seek per frame to prevent cascading I/O stalls */
+    seek_busy = false;
+
     err = mp3player_process();
     if (err != MP3PLAYER_OK) {
         menu_show_error(menu, convert_error_message(err));
@@ -795,12 +799,13 @@ static void process (menu_t *menu) {
         }
     } else if (menu->actions.go_up || menu->actions.go_down) {
         try_skip_track(menu, menu->actions.go_up ? -1 : 1);
-    } else if (menu->actions.go_left || menu->actions.go_right) {
+    } else if ((menu->actions.go_left || menu->actions.go_right) && !seek_busy) {
         int seconds = menu->actions.go_fast ? SEEK_SECONDS_FAST : SEEK_SECONDS;
         err = mp3player_seek(menu->actions.go_left ? (-seconds) : seconds);
         if (err != MP3PLAYER_OK) {
             menu_show_error(menu, convert_error_message(err));
         }
+        seek_busy = true;
     }
 }
 

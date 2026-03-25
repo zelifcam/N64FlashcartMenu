@@ -73,6 +73,7 @@ typedef struct {
     drflac_uint64 total_pcm_frames;
     drflac_uint64 current_pcm_frame;
     int downsample;  /* 1 = native, 2 = halve, 4 = quarter, etc. */
+    char *filebuf;   /* stdio buffer for FLAC, reduces SD card round-trips */
 } audio_track_t;
 
 /** @brief Player state with current + preloaded next track. */
@@ -219,6 +220,10 @@ static void track_unload (audio_track_t *t) {
         fclose(t->f);
         t->f = NULL;
     }
+    if (t->filebuf) {
+        free(t->filebuf);
+        t->filebuf = NULL;
+    }
 }
 
 static mp3player_err_t track_load_mp3 (audio_track_t *t, int id3_flags) {
@@ -360,7 +365,17 @@ static mp3player_err_t track_load (audio_track_t *t, char *path, int id3_flags) 
     if ((t->f = fopen(path, "rb")) == NULL) {
         return MP3PLAYER_ERR_IO;
     }
-    setbuf(t->f, NULL);
+
+    /* FLAC benefits from buffered I/O since dr_flac does many small reads
+     * during seek table scanning. MP3 manages its own read buffer. */
+    if (t->format == AUDIO_FORMAT_FLAC) {
+        t->filebuf = malloc(8 * 1024);
+        if (t->filebuf) {
+            setvbuf(t->f, t->filebuf, _IOFBF, 8 * 1024);
+        }
+    } else {
+        setbuf(t->f, NULL);
+    }
 
     struct stat st;
     if (fstat(fileno(t->f), &st)) {
@@ -640,7 +655,11 @@ mp3player_err_t mp3player_seek (int seconds) {
     if (!p->current.loaded) return MP3PLAYER_ERR_NO_FILE;
 
     if (p->current.format == AUDIO_FORMAT_FLAC) {
-        /* Seek in native frame space (before downsampling) */
+        /* Stop the mixer during FLAC seek to prevent wave_read and seek
+         * from hitting the SD card simultaneously (single bus, I/O collision). */
+        bool was_playing = mp3player_is_playing();
+        if (was_playing) mixer_ch_stop(SOUND_MP3_PLAYER_CHANNEL);
+
         int native_rate = p->current.samplerate * p->current.downsample;
         drflac_int64 frame_offset = (drflac_int64)seconds * native_rate;
         drflac_int64 target = (drflac_int64)p->current.current_pcm_frame + frame_offset;
@@ -649,9 +668,11 @@ mp3player_err_t mp3player_seek (int seconds) {
             target = p->current.total_pcm_frames;
         }
         if (!drflac_seek_to_pcm_frame(p->current.flac, (drflac_uint64)target)) {
+            if (was_playing) mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
             return MP3PLAYER_ERR_IO;
         }
         p->current.current_pcm_frame = (drflac_uint64)target;
+        if (was_playing) mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
         return MP3PLAYER_OK;
     }
 
