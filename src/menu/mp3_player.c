@@ -571,8 +571,10 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
         if (t->info.frame_bytes == 0) {
             /* Current track exhausted. Try track crossover. */
             if (p->next_ready && p->next.loaded) {
+                ptrdiff_t buf_off = p->next.buffer_ptr - p->next.buffer;
                 track_unload(&p->current);
                 memcpy(&p->current, &p->next, sizeof(audio_track_t));
+                p->current.buffer_ptr = p->current.buffer + buf_off;
                 memset(&p->next, 0, sizeof(audio_track_t));
                 p->next_ready = false;
                 p->track_advanced = true;
@@ -659,8 +661,10 @@ mp3player_err_t mp3player_process (void) {
     /* If the track ended and a preloaded next is waiting but the mixer
      * already stopped (wave_read never got to do the crossover), swap here. */
     if (track_is_finished(&p->current) && p->next_ready && !mp3player_is_playing()) {
+        ptrdiff_t buf_off = p->next.buffer_ptr - p->next.buffer;
         track_unload(&p->current);
         memcpy(&p->current, &p->next, sizeof(audio_track_t));
+        p->current.buffer_ptr = p->current.buffer + buf_off;
         memset(&p->next, 0, sizeof(audio_track_t));
         p->next_ready = false;
         p->track_advanced = true;
