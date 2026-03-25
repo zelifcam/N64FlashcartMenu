@@ -371,11 +371,11 @@ static mp3player_err_t track_load_flac (audio_track_t *t, int id3_flags) {
         return MP3PLAYER_ERR_INVALID_FILE;
     }
 
-    /* Downsample hi-res audio to keep SD card reads manageable.
-     * 192kHz at native rate reads 4x more data per second than needed. */
+    /* Downsample to 48kHz max. Higher rates demand more decoded samples
+     * per mixer callback than the CPU can reliably produce. */
     t->native_rate = t->flac->sampleRate;
     t->downsample = 1;
-    while (t->native_rate / t->downsample > 96000 && t->downsample < 8) {
+    while (t->native_rate / t->downsample > 48000 && t->downsample < 8) {
         t->downsample *= 2;
     }
 
@@ -597,7 +597,7 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
 /* --- Public API --- */
 
 void mp3player_mixer_init (void) {
-    mixer_ch_set_limits(SOUND_MP3_PLAYER_CHANNEL, 16, 96000, 0);
+    mixer_ch_set_limits(SOUND_MP3_PLAYER_CHANNEL, 16, 48000, 0);
 }
 
 mp3player_err_t mp3player_init (void) {

@@ -94,19 +94,70 @@ jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
     jpeg_stdio_src(&decoder->cinfo, decoder->f);
     jpeg_read_header(&decoder->cinfo, TRUE);
 
-    /* Pick the best DCT scale that fits within max dimensions */
-    decoder->cinfo.scale_num   = 1;
-    decoder->cinfo.scale_denom = 1;
+    /* Progressive JPEGs require libjpeg to buffer all DCT coefficients
+     * before outputting any scanlines. Estimate the coefficient buffer size
+     * (2x to account for libjpeg internal overhead) and reject if it won't
+     * fit, before jpeg_start_decompress does the huge allocation. */
+    if (jpeg_has_multiple_scans(&decoder->cinfo)) {
+        size_t coeff_size = (size_t)decoder->cinfo.image_width
+                          * decoder->cinfo.image_height
+                          * decoder->cinfo.num_components * sizeof(JCOEF) * 2;
+        heap_stats_t heap;
+        sys_get_heap_stats(&heap);
+        size_t available = heap.total - heap.used;
+        if (coeff_size + 128 * 1024 > available) {
+            jpeg_decoder_deinit(false);
+            return JPEG_ERR_OUT_OF_MEM;
+        }
+    }
+
+    /* Pick the best DCT scale that fits within max dimensions AND
+     * available heap. Try the largest scale first, fall back to smaller
+     * until the output surface + row buffer + headroom fits in memory. */
+    decoder->cinfo.dct_method = JDCT_IFAST;
+    bool fits = false;
     for (int denom = 1; denom <= 8; denom *= 2) {
+        decoder->cinfo.scale_num   = 1;
         decoder->cinfo.scale_denom = denom;
         jpeg_calc_output_dimensions(&decoder->cinfo);
-        if ((int)decoder->cinfo.output_width  <= max_width &&
-            (int)decoder->cinfo.output_height <= max_height) {
+
+        int out_w = (int)decoder->cinfo.output_width;
+        int out_h = (int)decoder->cinfo.output_height;
+
+        /* Clamp to caller's max dimensions */
+        int dst_w = out_w, dst_h = out_h;
+        if (dst_w > max_width || dst_h > max_height) {
+            if (out_w * max_height >= out_h * max_width) {
+                dst_w = max_width;
+                dst_h = (out_h * max_width) / out_w;
+            } else {
+                dst_h = max_height;
+                dst_w = (out_w * max_height) / out_h;
+            }
+        }
+        if (dst_w < 1) dst_w = 1;
+        if (dst_h < 1) dst_h = 1;
+
+        int comps = decoder->cinfo.output_components;
+        /* Our row buffer + libjpeg internal buffers (color convert,
+         * upsample, ~10 rows of working memory at output width). */
+        size_t jpeg_cost = (size_t)out_w * comps * 12;
+        size_t surf_size = (size_t)dst_w * dst_h * 2;
+
+        heap_stats_t heap;
+        sys_get_heap_stats(&heap);
+        size_t available = heap.total - heap.used;
+
+        if (jpeg_cost + surf_size + 64 * 1024 <= available) {
+            fits = true;
             break;
         }
     }
 
-    decoder->cinfo.dct_method = JDCT_IFAST;
+    if (!fits) {
+        jpeg_decoder_deinit(false);
+        return JPEG_ERR_OUT_OF_MEM;
+    }
 
     jpeg_start_decompress(&decoder->cinfo);
 
@@ -129,16 +180,6 @@ jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
     if (decoder->dst_w < 1) decoder->dst_w = 1;
     if (decoder->dst_h < 1) decoder->dst_h = 1;
 
-    /* Check heap before allocating */
-    size_t row_buf_size = (size_t)decoder->src_w * decoder->comps;
-    size_t surf_size    = (size_t)decoder->dst_w * decoder->dst_h * 2;
-    heap_stats_t heap;
-    sys_get_heap_stats(&heap);
-    if (row_buf_size + surf_size + 64 * 1024 > (size_t)(heap.total - heap.used)) {
-        jpeg_decoder_deinit(false);
-        return JPEG_ERR_OUT_OF_MEM;
-    }
-
     decoder->image = calloc(1, sizeof(surface_t));
     if (!decoder->image) {
         jpeg_decoder_deinit(false);
@@ -151,7 +192,7 @@ jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
         return JPEG_ERR_OUT_OF_MEM;
     }
 
-    decoder->row_buf = malloc(row_buf_size);
+    decoder->row_buf = malloc((size_t)decoder->src_w * decoder->comps);
     if (!decoder->row_buf) {
         jpeg_decoder_deinit(true);
         return JPEG_ERR_OUT_OF_MEM;

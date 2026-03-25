@@ -5,6 +5,7 @@
  */
 
 #include <stdio.h>
+#include <libdragon.h>
 #include <libspng/spng/spng.h>
 #include "png_decoder.h"
 #include "utils/fs.h"
@@ -16,6 +17,7 @@ typedef struct {
     struct spng_ihdr ihdr; /**< SPNG image header */
     surface_t *image; /**< Image surface */
     uint8_t *row_buffer; /**< Row buffer */
+    int dst_w, dst_h; /**< Output dimensions (may be scaled down) */
     int decoded_rows; /**< Number of decoded rows */
     png_callback_t *callback; /**< Callback function */
     void *callback_data; /**< Callback data */
@@ -83,7 +85,9 @@ png_err_t png_decoder_start (char *path, int max_width, int max_height, png_call
         return PNG_ERR_INT;
     }
 
-    if (spng_set_image_limits(decoder->ctx, max_width, max_height) != SPNG_OK) {
+    /* Allow large source PNGs — we scale down to fit available memory.
+     * Cap at 4096 to reject corrupt headers without blocking real images. */
+    if (spng_set_image_limits(decoder->ctx, 4096, 4096) != SPNG_OK) {
         png_decoder_deinit(false);
         return PNG_ERR_INT;
     }
@@ -110,19 +114,49 @@ png_err_t png_decoder_start (char *path, int max_width, int max_height, png_call
         return PNG_ERR_BAD_FILE;
     }
 
+    /* Start at caller's max dimensions (or source size if smaller),
+     * then scale down by powers of 2 until it fits in available memory. */
+    int src_w = decoder->ihdr.width;
+    int src_h = decoder->ihdr.height;
+    decoder->dst_w = (src_w < max_width) ? src_w : max_width;
+    decoder->dst_h = (src_h < max_height) ? src_h : max_height;
+
+    /* Preserve aspect ratio */
+    if (src_w * decoder->dst_h > src_h * decoder->dst_w) {
+        decoder->dst_h = (src_h * decoder->dst_w) / src_w;
+    } else {
+        decoder->dst_w = (src_w * decoder->dst_h) / src_h;
+    }
+
+    while (decoder->dst_w > 1 && decoder->dst_h > 1) {
+        size_t row_size  = (size_t)src_w * 3;
+        size_t surf_size = (size_t)decoder->dst_w * decoder->dst_h * 2;
+
+        heap_stats_t heap;
+        sys_get_heap_stats(&heap);
+        size_t available = heap.total - heap.used;
+
+        if (row_size + surf_size + 64 * 1024 <= available) break;
+
+        decoder->dst_w /= 2;
+        decoder->dst_h /= 2;
+    }
+    if (decoder->dst_w < 1) decoder->dst_w = 1;
+    if (decoder->dst_h < 1) decoder->dst_h = 1;
+
     decoder->image = calloc(1, sizeof(surface_t));
     if (decoder->image == NULL) {
         png_decoder_deinit(false);
         return PNG_ERR_OUT_OF_MEM;
     }
 
-    *decoder->image = surface_alloc(FMT_RGBA16, decoder->ihdr.width, decoder->ihdr.height);
+    *decoder->image = surface_alloc(FMT_RGBA16, decoder->dst_w, decoder->dst_h);
     if (decoder->image->buffer == NULL) {
         png_decoder_deinit(true);
         return PNG_ERR_OUT_OF_MEM;
     }
 
-    if ((decoder->row_buffer = malloc(decoder->ihdr.width * 3)) == NULL) {
+    if ((decoder->row_buffer = malloc(src_w * 3)) == NULL) {
         png_decoder_deinit(true);
         return PNG_ERR_OUT_OF_MEM;
     }
@@ -176,12 +210,22 @@ void png_decoder_poll (void) {
 
     if (err == SPNG_OK || err == SPNG_EOI) {
         decoder->decoded_rows += 1;
-        uint16_t *image_buffer = decoder->image->buffer + (row_info.row_num * decoder->image->stride);
-        for (int i = 0; i < decoder->ihdr.width * 3; i += 3) {
-            uint8_t r = decoder->row_buffer[i + 0] >> 3;
-            uint8_t g = decoder->row_buffer[i + 1] >> 3;
-            uint8_t b = decoder->row_buffer[i + 2] >> 3;
-            *image_buffer++ = (r << 11) | (g << 6) | (b << 1) | 1;
+
+        int src_w = decoder->ihdr.width;
+        int src_h = decoder->ihdr.height;
+        int dst_y = (row_info.row_num * decoder->dst_h) / src_h;
+
+        if (dst_y < decoder->dst_h) {
+            uint16_t *dst_row = (uint16_t *)((uint8_t *)decoder->image->buffer
+                                             + dst_y * decoder->image->stride);
+            for (int dx = 0; dx < decoder->dst_w; dx++) {
+                int sx = (dx * src_w) / decoder->dst_w;
+                uint8_t *p = decoder->row_buffer + sx * 3;
+                uint8_t r = p[0] >> 3;
+                uint8_t g = p[1] >> 3;
+                uint8_t b = p[2] >> 3;
+                dst_row[dx] = (r << 11) | (g << 6) | (b << 1) | 1;
+            }
         }
     }
 

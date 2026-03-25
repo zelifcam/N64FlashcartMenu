@@ -1,10 +1,22 @@
 #include <stdlib.h>
 #include <string.h>
+#include <malloc.h>
 #include "../sound.h"
 
 #include "../jpeg_decoder.h"
 #include "../png_decoder.h"
 #include "views.h"
+
+#ifdef HEAP_DEBUG
+#define heap_debugf(tag) do { \
+    heap_stats_t _h; sys_get_heap_stats(&_h); \
+    debugf("[HEAP] %-30s used=%lu free=%lu\n", \
+           (tag), (unsigned long)_h.used, \
+           (unsigned long)(_h.total - _h.used)); \
+} while(0)
+#else
+#define heap_debugf(tag) ((void)0)
+#endif
 
 
 static bool show_message;
@@ -41,6 +53,7 @@ static void png_callback (png_err_t err, surface_t *decoded_image, void *callbac
 
     image_loading = false;
     image = decoded_image;
+    heap_debugf("imgview_png_cb: done");
 
     if (err != PNG_OK) {
         menu_show_error(menu, convert_error_message(err, false));
@@ -52,6 +65,7 @@ static void jpeg_callback (jpeg_err_t err, surface_t *decoded_image, void *callb
 
     image_loading = false;
     image = decoded_image;
+    heap_debugf("imgview_jpeg_cb: done");
 
     if (err != JPEG_OK) {
         menu_show_error(menu, convert_error_message(err, true));
@@ -113,6 +127,7 @@ static void draw (menu_t *menu, surface_t *d) {
 }
 
 static void deinit (menu_t *menu) {
+    heap_debugf("imgview_deinit: enter");
     if (image_loading) {
         if (is_jpeg) {
             jpeg_decoder_abort();
@@ -129,10 +144,13 @@ static void deinit (menu_t *menu) {
             free(image);
         }
     }
+    image = NULL;
+    heap_debugf("imgview_deinit: done");
 }
 
 
 void view_image_viewer_init (menu_t *menu) {
+    heap_debugf("imgview_init: enter");
     show_message = false;
     image_loading = true;
     image_set_as_background = false;
