@@ -16,7 +16,7 @@
 #define SEEK_SECONDS_FAST       (60)
 #define COVER_ART_MAX_SIZE      (238)
 #define CONTENT_TOP_OFFSET      (54)
-#define HEADER_UNIT_HEIGHT      (30)
+#define HEADER_UNIT_HEIGHT      (46)  /* title + ticker + tech line */
 #define HEADER_BASELINE_OFFSET  (12)
 #define HEADER_LINE_SPACING     (16)
 #define CONTENT_BOTTOM_PAD      (8)
@@ -24,6 +24,7 @@
 #define QUEUE_TEXT_WIDTH         (280)
 #define TICKER_SCROLL_SPEED     (0.5f)
 #define COVER_SCAN_MAX_ATTEMPTS (20)
+#define LOGO_MIN_FRAMES         (64)  /* two full rotations minimum */
 
 typedef enum {
     PLAYBACK_NORMAL,
@@ -42,6 +43,20 @@ static const char *playback_mode_name[] = {
     [PLAYBACK_PARTY]      = "Party",
 };
 
+typedef enum {
+    PLAYER_LOADING,
+    PLAYER_READY,
+} player_state_t;
+
+static player_state_t player_state = PLAYER_LOADING;
+static int loading_step = 0;
+static uint32_t load_start_ticks = 0;
+
+/** Get milliseconds since loading started. */
+static unsigned long load_ms (void) {
+    return TICKS_DISTANCE(load_start_ticks, TICKS_READ()) / (TICKS_PER_SECOND / 1000);
+}
+
 static playback_mode_t playback_mode = PLAYBACK_NORMAL;
 static bool advance_failed = false;
 static float ticker_offset = 0.0f;
@@ -56,6 +71,12 @@ static int shuffle_count = 0;
 static int shuffle_pos = 0;
 
 /* Cover art state */
+static bool cover_art_expected = false;
+static bool cover_first_load = true;
+static bool logo_blocks_built = false;
+static int logo_frame = 0;
+static char cover_art_source[256] = "";  /* path of currently loaded art */
+
 typedef enum {
     COVER_IDLE,
     COVER_LOADING_JPEG,
@@ -227,10 +248,15 @@ static bool png_dimensions_ok (const char *path, int max_dim) {
 static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
     cover_state = COVER_IDLE;
     if (err == JPEG_OK && image) {
+        debugf("[COVER] %lums: JPEG decode OK: %dx%d\n", load_ms(), image->width, image->height);
+        if (cover_image) {
+            surface_free(cover_image);
+            free(cover_image);
+        }
         cover_image = image;
         cover_cache_blit_params();
     } else {
-        debugf("Cover art decode failed (err %d), trying next\n", err);
+        debugf("[COVER] %lums: JPEG decode FAILED (err %d), trying next\n", load_ms(), err);
         try_next_cover_source();
     }
 }
@@ -238,10 +264,33 @@ static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
 static void cover_art_png_callback (png_err_t err, surface_t *image, void *data) {
     cover_state = COVER_IDLE;
     if (err == PNG_OK && image) {
+        debugf("[COVER] %lums: PNG decode OK: %dx%d\n", load_ms(), image->width, image->height);
+        if (cover_image) {
+            surface_free(cover_image);
+            free(cover_image);
+        }
         cover_image = image;
         cover_cache_blit_params();
     } else {
-        debugf("PNG cover decode failed (err %d), trying next\n", err);
+        debugf("[COVER] %lums: PNG decode FAILED (err %d)\n", load_ms(), err);
+
+        /* If a .png temp file failed, the APIC data might actually be JPEG.
+         * Try decoding as JPEG before giving up. */
+        const id3_metadata_t *meta = mp3player_get_metadata();
+        if (meta->has_cover_art && meta->cover_art_path[0]) {
+            debugf("[COVER] %lums: retrying embedded art as JPEG\n", load_ms());
+            int max_size = cover_art_budget_size();
+            cover_state = COVER_LOADING_JPEG;
+            jpeg_err_t jerr = jpeg_decoder_start((char *)meta->cover_art_path, max_size, max_size,
+                                                  (jpeg_callback_t *)cover_art_callback, NULL);
+            if (jerr == JPEG_OK) {
+                debugf("[COVER] %lums: JPEG fallback decode started\n", load_ms());
+                return;
+            }
+            cover_state = COVER_IDLE;
+            debugf("[COVER] %lums: JPEG fallback also failed (err %d)\n", load_ms(), jerr);
+        }
+
         try_next_cover_source();
     }
 }
@@ -253,18 +302,21 @@ static bool try_cover_path (const char *path, int max_size) {
     ext++;
 
     if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) {
+        debugf("[COVER] %lums: trying JPEG: %s (max %d)\n", load_ms(), path, max_size);
         cover_state = COVER_LOADING_JPEG;
         jpeg_err_t err = jpeg_decoder_start((char *)path, max_size, max_size,
                                             (jpeg_callback_t *)cover_art_callback, NULL);
         if (err != JPEG_OK) {
             cover_state = COVER_IDLE;
-            debugf("JPEG start failed: %s (err %d)\n", path, err);
+            debugf("[COVER] %lums: JPEG start FAILED: %s (err %d)\n", load_ms(), path, err);
             return false;
         }
+        debugf("[COVER] %lums: JPEG decode started\n", load_ms());
         return true;
     } else if (strcasecmp(ext, "png") == 0) {
+        debugf("[COVER] %lums: trying PNG: %s (max %d)\n", load_ms(), path, max_size);
         if (!png_dimensions_ok(path, max_size)) {
-            debugf("PNG too large, skipping: %s\n", path);
+            debugf("[COVER] %lums: PNG too large, skipping: %s\n", load_ms(), path);
             return false;
         }
         cover_state = COVER_LOADING_PNG;
@@ -272,9 +324,10 @@ static bool try_cover_path (const char *path, int max_size) {
                                           cover_art_png_callback, NULL);
         if (err != PNG_OK) {
             cover_state = COVER_IDLE;
-            debugf("PNG start failed: %s (err %d)\n", path, err);
+            debugf("[COVER] %lums: PNG start FAILED: %s (err %d)\n", load_ms(), path, err);
             return false;
         }
+        debugf("[COVER] %lums: PNG decode started\n", load_ms());
         return true;
     }
     return false;
@@ -345,21 +398,107 @@ static void scan_directory_for_cover (path_t *dir) {
     }
 }
 
+/** Find the path that cover art would come from (no decoding).
+ *  Returns the path string in out_path, or empty string if none found. */
+static void find_cover_art_source (path_t *directory, char *out_path, size_t out_size) {
+    out_path[0] = '\0';
+
+    const id3_metadata_t *meta = mp3player_get_metadata();
+    debugf("[COVER] %lums: find_source: has_cover_art=%d has_metadata=%d dir='%s'\n",
+           load_ms(), meta->has_cover_art, meta->has_metadata, path_get(directory));
+
+    if (meta->has_cover_art && meta->cover_art_path[0]) {
+        debugf("[COVER] %lums: find_source: embedded art at '%s'\n", load_ms(), meta->cover_art_path);
+        strncpy(out_path, meta->cover_art_path, out_size - 1);
+        out_path[out_size - 1] = '\0';
+        return;
+    }
+
+    /* Check preferred filenames */
+    for (const char **name = preferred_cover_names; *name; name++) {
+        for (const char **ext = cover_image_extensions; *ext; ext++) {
+            char filename[64];
+            snprintf(filename, sizeof(filename), "%s.%s", *name, *ext);
+            path_t *candidate = path_clone_push(directory, filename);
+            struct stat st;
+            if (stat(path_get(candidate), &st) == 0) {
+                strncpy(out_path, path_get(candidate), out_size - 1);
+                out_path[out_size - 1] = '\0';
+                path_free(candidate);
+                return;
+            }
+            path_free(candidate);
+        }
+    }
+
+    /* Quick scan for any image file */
+    dir_t dir_entry;
+    if (dir_findfirst(path_get(directory), &dir_entry) == 0) {
+        do {
+            if (dir_entry.d_type == DT_REG &&
+                file_has_extensions(dir_entry.d_name, cover_image_extensions)) {
+                path_t *candidate = path_clone_push(directory, dir_entry.d_name);
+                strncpy(out_path, path_get(candidate), out_size - 1);
+                out_path[out_size - 1] = '\0';
+                path_free(candidate);
+                return;
+            }
+        } while (dir_findnext(path_get(directory), &dir_entry) == 0);
+    }
+}
+
 /** Start the cover art loading process for the current track. */
 static void load_cover_art (path_t *directory) {
+    /* Find what art source this track would use */
+    char new_source[256];
+    find_cover_art_source(directory, new_source, sizeof(new_source));
+
+    /* For embedded art, use a unique key per track so different tracks
+     * with different embedded art always reload. The temp file path is
+     * the same for all tracks, so we can't use it for comparison. */
+    const id3_metadata_t *meta_src = mp3player_get_metadata();
+    if (meta_src->has_cover_art && meta_src->cover_art_path[0]) {
+        /* "embedded:N" where N increments ensures no false cache hits */
+        static int embedded_counter = 0;
+        snprintf(new_source, sizeof(new_source), "embedded:%d", ++embedded_counter);
+    }
+
+    debugf("[COVER] %lums: source key: '%s'\n", load_ms(), new_source[0] ? new_source : "(none)");
+
+    /* If same source as current and we already have an image, skip reload */
+    if (cover_image && new_source[0] && strcmp(new_source, cover_art_source) == 0) {
+        debugf("[COVER] %lums: same source as current, skipping reload\n", load_ms());
+        return;
+    }
+
     /* Abort any in-progress decode */
     if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_abort();
     if (cover_state == COVER_LOADING_PNG) png_decoder_abort();
     cover_state = COVER_IDLE;
-
-    /* Free previous image */
-    if (cover_image) {
-        surface_free(cover_image);
-        free(cover_image);
-        cover_image = NULL;
-    }
-    cover_disp_size = 0;
     cover_dir_scan_active = false;
+
+    cover_art_expected = (new_source[0] != '\0');
+
+    /* On first load or no art: free old image. Otherwise keep it visible
+     * while the new one decodes (avoids blank flash between tracks). */
+    if (cover_first_load || !cover_art_expected) {
+        if (cover_image) {
+            surface_free(cover_image);
+            free(cover_image);
+            cover_image = NULL;
+        }
+        cover_disp_size = 0;
+        cover_art_expected = (new_source[0] != '\0');
+    }
+
+    if (!cover_art_expected) {
+        cover_art_source[0] = '\0';
+        return;
+    }
+
+    /* Store the new source so we can compare on next track change */
+    strncpy(cover_art_source, new_source, sizeof(cover_art_source) - 1);
+    cover_art_source[sizeof(cover_art_source) - 1] = '\0';
 
     const id3_metadata_t *meta = mp3player_get_metadata();
 
@@ -452,6 +591,49 @@ static void build_shuffle_list (menu_t *menu) {
     }
 }
 
+/** Preload the next track for seamless playback based on current mode. */
+static void preload_next_track (menu_t *menu) {
+    int current = menu->browser.selected;
+    int count = menu->browser.entries;
+    int next_idx = -1;
+
+    if (playback_mode == PLAYBACK_REPEAT_ONE) {
+        next_idx = current;
+    } else if (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) {
+        if (shuffle_list && shuffle_pos + 1 < shuffle_count) {
+            next_idx = shuffle_list[shuffle_pos + 1];
+        } else if (playback_mode == PLAYBACK_PARTY) {
+            /* Will reshuffle when needed, preload first of next cycle isn't practical */
+            return;
+        }
+    } else {
+        /* Normal / Loop: find next music file */
+        for (int i = current + 1; i < count; i++) {
+            if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
+                next_idx = i;
+                break;
+            }
+        }
+        if (next_idx < 0 && playback_mode == PLAYBACK_LOOP) {
+            for (int i = 0; i < current; i++) {
+                if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
+                    next_idx = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (next_idx >= 0 && next_idx < count) {
+        entry_t *e = &menu->browser.list[next_idx];
+        if (e->type == ENTRY_TYPE_MUSIC) {
+            path_t *path = path_clone_push(menu->browser.directory, e->name);
+            mp3player_preload_next(path_get(path));
+            path_free(path);
+        }
+    }
+}
+
 /** Try to load and play the track at the given browser index.
  *  Returns true on success. */
 static bool try_play_index (menu_t *menu, int idx) {
@@ -472,7 +654,9 @@ static bool try_play_index (menu_t *menu, int idx) {
     menu->browser.entry = e;
     advance_failed = false;
     ticker_offset = 0.0f;
+
     load_cover_art(menu->browser.directory);
+    preload_next_track(menu);
     return true;
 }
 
@@ -542,7 +726,45 @@ static void process (menu_t *menu) {
         return;
     }
 
-    /* Auto-advance to next track when current one finishes */
+    /* Handle track crossover: the mixer already switched tracks internally */
+    if (mp3player_did_advance()) {
+        /* Find what track is now playing and update UI state */
+        if (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) {
+            shuffle_pos++;
+            if (shuffle_pos >= shuffle_count && playback_mode == PLAYBACK_PARTY) {
+                build_shuffle_list(menu);
+                shuffle_pos = 0;
+            }
+            if (shuffle_pos < shuffle_count) {
+                int idx = shuffle_list[shuffle_pos];
+                menu->browser.selected = idx;
+                menu->browser.entry = &menu->browser.list[idx];
+            }
+        } else {
+            /* Find next music file after current selection */
+            for (int i = menu->browser.selected + 1; i < menu->browser.entries; i++) {
+                if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
+                    menu->browser.selected = i;
+                    menu->browser.entry = &menu->browser.list[i];
+                    break;
+                }
+            }
+            if (playback_mode == PLAYBACK_LOOP && mp3player_is_finished()) {
+                for (int i = 0; i < menu->browser.entries; i++) {
+                    if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
+                        menu->browser.selected = i;
+                        menu->browser.entry = &menu->browser.list[i];
+                        break;
+                    }
+                }
+            }
+        }
+        load_cover_art(menu->browser.directory);
+        preload_next_track(menu);
+        advance_failed = false;
+    }
+
+    /* Fallback: if track finished without crossover (no preload ready), try manual advance */
     if (mp3player_is_finished() && !advance_failed) {
         if (!try_skip_track(menu, 1)) {
             advance_failed = true;
@@ -599,8 +821,10 @@ static void draw (menu_t *menu, surface_t *d) {
     /* Center the title + ticker as a unit between top edge and art/content */
     int content_top_y = VISIBLE_AREA_Y0 + CONTENT_TOP_OFFSET;
     int bar_top_y = SEEKBAR_Y - BORDER_THICKNESS;
-    int art_top_approx = cover_image
-        ? content_top_y + ((bar_top_y - content_top_y - CONTENT_BOTTOM_PAD * 2 - cover_disp_size) / 2)
+    int expected_art = cover_art_expected ? COVER_ART_MAX_SIZE : 0;
+    if (cover_image && cover_disp_size > 0) expected_art = cover_disp_size;
+    int art_top_approx = expected_art > 0
+        ? content_top_y + ((bar_top_y - content_top_y - CONTENT_BOTTOM_PAD * 2 - expected_art) / 2)
         : content_top_y;
 
     int header_y = VISIBLE_AREA_Y0 + (art_top_approx - VISIBLE_AREA_Y0 - HEADER_UNIT_HEIGHT) / 2;
@@ -640,13 +864,15 @@ static void draw (menu_t *menu, surface_t *d) {
             if (n < 0 || (size_t)n >= remaining) { remaining = 0; } else { p += n; remaining -= n; }
             need_sep = true;
         }
-        snprintf(p, remaining, "%s%dHz \xC2\xB7 %.0fkbps",
-                 need_sep ? sep : "",
-                 mp3player_get_samplerate(),
-                 (double)(mp3player_get_bitrate() / 1000));
+        if (meta->year[0] && remaining > 0) {
+            int n = snprintf(p, remaining, "%s%s", need_sep ? sep : "", meta->year);
+            if (n < 0 || (size_t)n >= remaining) { remaining = 0; } else { p += n; remaining -= n; }
+        }
     }
 
-    size_t ticker_len = strlen(ticker_str);
+    char safe_ticker[512];
+    sanitize_rdpq_text(safe_ticker, ticker_str, sizeof(safe_ticker));
+    size_t ticker_len = strlen(safe_ticker);
 
     if (ticker_len > 0) {
         /* Measure actual pixel width */
@@ -654,12 +880,12 @@ static void draw (menu_t *menu, surface_t *d) {
             &(rdpq_textparms_t) { .style_id = STL_DEFAULT },
             FNT_DEFAULT,
             -1000, -1000,
-            ticker_str, ticker_len
+            safe_ticker, ticker_len
         );
         int full_width = (int)metrics.advance_x;
 
         if (full_width <= ticker_w) {
-            /* Fits on screen, just center it */
+            /* Fits on screen, center it */
             rdpq_text_printn(
                 &(rdpq_textparms_t) {
                     .style_id = STL_DEFAULT,
@@ -668,13 +894,13 @@ static void draw (menu_t *menu, surface_t *d) {
                 },
                 FNT_DEFAULT,
                 ticker_x, ticker_y,
-                ticker_str, ticker_len
+                safe_ticker, ticker_len
             );
         } else {
             /* Too wide, scroll it */
             const char *wrap_pad = "     ";
             char scroll_str[576];
-            snprintf(scroll_str, sizeof(scroll_str), "%s%s%s%s", ticker_str, wrap_pad, ticker_str, wrap_pad);
+            snprintf(scroll_str, sizeof(scroll_str), "%s%s%s%s", safe_ticker, wrap_pad, safe_ticker, wrap_pad);
             size_t scroll_len = strlen(scroll_str);
 
             int cycle_width = full_width + (int)rdpq_text_printn(
@@ -699,6 +925,25 @@ static void draw (menu_t *menu, surface_t *d) {
 
             rdpq_set_scissor(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
         }
+    }
+
+    /* Hz / kbps line below the ticker, gray and centered */
+    {
+        char tech_str[64];
+        snprintf(tech_str, sizeof(tech_str), "%dHz \xC2\xB7 %.0fkbps",
+                 mp3player_get_samplerate(),
+                 (double)(mp3player_get_bitrate() / 1000));
+        int tech_y = ticker_y + HEADER_LINE_SPACING;
+        rdpq_text_printn(
+            &(rdpq_textparms_t) {
+                .style_id = STL_GRAY,
+                .width = ticker_w,
+                .align = ALIGN_CENTER,
+            },
+            FNT_DEFAULT,
+            ticker_x, tech_y,
+            tech_str, strlen(tech_str)
+        );
     }
 
     /* Build the queue view using the pre-built music index map */
@@ -727,7 +972,9 @@ static void draw (menu_t *menu, surface_t *d) {
     int content_bottom = SEEKBAR_Y - BORDER_THICKNESS - CONTENT_BOTTOM_PAD;
     int content_h = content_bottom - content_top;
 
-    int art_size = cover_image ? cover_disp_size : 0;
+    /* Use expected size for layout even before image finishes decoding */
+    int art_size = cover_art_expected ? COVER_ART_MAX_SIZE : 0;
+    if (cover_image && cover_disp_size > 0) art_size = cover_disp_size;
     int max_queue_lines = content_h / QUEUE_LINE_HEIGHT;
     if (max_queue_lines < 1) max_queue_lines = 1;
     if (max_queue_lines > QUEUE_MAX_VISIBLE) max_queue_lines = QUEUE_MAX_VISIBLE;
@@ -757,7 +1004,7 @@ static void draw (menu_t *menu, surface_t *d) {
     int art_x, art_y;
     int queue_x, queue_y;
 
-    if (cover_image && art_size > 0) {
+    if (art_size > 0) {
         block_w = art_size + QUEUE_GAP + queue_w;
         int block_x = DISPLAY_CENTER_X - block_w / 2;
         art_x = block_x;
@@ -770,15 +1017,13 @@ static void draw (menu_t *menu, surface_t *d) {
 
     int visible_queue_h = (window_end - window_start) * QUEUE_LINE_HEIGHT;
 
-    if (cover_image && art_size > 0) {
-        /* Align queue top with cover art top, offset for text baseline */
-        queue_y = art_y + 12;
+    if (art_size > 0) {
+        queue_y = art_y + HEADER_BASELINE_OFFSET;
     } else {
-        /* No art: center the queue vertically */
         queue_y = content_top + (content_h - visible_queue_h) / 2;
     }
 
-    /* Render cover art */
+    /* Render cover art or loading placeholder */
     if (cover_image) {
         int crop = (cover_image->width < cover_image->height)
                    ? cover_image->width : cover_image->height;
@@ -795,6 +1040,31 @@ static void draw (menu_t *menu, surface_t *d) {
             .filtering = true,
         });
         rdpq_mode_pop();
+    } else if (cover_art_expected && art_size > 0 && cover_first_load) {
+        /* First load: show animated N64 logo as placeholder */
+        logo_frame++;
+
+        /* If art arrived but logo hasn't completed one full loop, keep showing logo */
+        if (cover_image && logo_frame >= LOGO_MIN_FRAMES) {
+            cover_first_load = false;
+        } else {
+            if (logo_blocks_built) {
+                ui_components_n64_logo_draw(logo_frame);
+            }
+
+            /* "Loading..." text centered below the logo */
+            const char *loading_text = "Loading...";
+            rdpq_text_printn(
+                &(rdpq_textparms_t) {
+                    .style_id = STL_GRAY,
+                    .width = art_size,
+                    .align = ALIGN_CENTER,
+                },
+                FNT_DEFAULT,
+                art_x, art_y + art_size / 2 + art_size / 4 + 20,
+                loading_text, strlen(loading_text)
+            );
+        }
     }
 
     /* Render queue list */
@@ -910,6 +1180,13 @@ static void deinit (void) {
         cover_image = NULL;
     }
     cover_disp_size = 0;
+    cover_art_expected = false;
+    cover_first_load = true;
+    cover_art_source[0] = '\0';
+    if (logo_blocks_built) {
+        ui_components_n64_logo_free();
+        logo_blocks_built = false;
+    }
     if (cover_dir) {
         path_free(cover_dir);
         cover_dir = NULL;
@@ -932,14 +1209,115 @@ static void deinit (void) {
 }
 
 
+/** Draw the loading screen (logo animation centered on black background). */
+static void draw_loading_screen (surface_t *d) {
+    rdpq_attach(d, NULL);
+
+    ui_components_background_draw();
+    ui_components_layout_draw();
+
+    if (logo_blocks_built) {
+        logo_frame++;
+        ui_components_n64_logo_draw(logo_frame);
+    }
+
+    rdpq_detach_show();
+}
+
+/** Perform one loading step per frame. Returns true when fully loaded. */
+static bool loading_tick (menu_t *menu) {
+    switch (loading_step) {
+        case 0: {
+            /* Step 0: Build logo blocks centered on screen */
+            debugf("[LOAD] %lums: step 0: build logo blocks\n", load_ms());
+            if (logo_blocks_built) {
+                ui_components_n64_logo_free();
+            }
+            int ct = VISIBLE_AREA_Y0 + CONTENT_TOP_OFFSET;
+            int cb = SEEKBAR_Y - BORDER_THICKNESS - CONTENT_BOTTOM_PAD;
+            int ch = cb - ct;
+            int logo_s = COVER_ART_MAX_SIZE / 2;
+            ui_components_n64_logo_init(DISPLAY_CENTER_X, ct + ch / 2, logo_s);
+            logo_blocks_built = true;
+            debugf("[LOAD] %lums: step 0: done\n", load_ms());
+            loading_step++;
+            return false;
+        }
+        case 1: {
+            /* Step 1: Init MP3 player */
+            debugf("[LOAD] %lums: step 1: mp3player_init\n", load_ms());
+            mp3player_err_t err = mp3player_init();
+            if (err != MP3PLAYER_OK) {
+                menu_show_error(menu, convert_error_message(err));
+                mp3player_deinit();
+                return true;
+            }
+            loading_step++;
+            return false;
+        }
+        case 2: {
+            /* Step 2: Load the track (don't play yet) */
+            debugf("[LOAD] %lums: step 2: mp3player_load '%s'\n", load_ms(), menu->browser.entry->name);
+            path_t *path = path_clone_push(menu->browser.directory, menu->browser.entry->name);
+            mp3player_err_t err = mp3player_load(path_get(path));
+            path_free(path);
+            if (err != MP3PLAYER_OK) {
+                menu_show_error(menu, convert_error_message(err));
+                mp3player_deinit();
+                return true;
+            }
+            loading_step++;
+            return false;
+        }
+        case 3: {
+            /* Step 3: Build music index map */
+            debugf("[LOAD] %lums: step 3: build music index map (%ld entries)\n", load_ms(), (long)menu->browser.entries);
+            build_music_index_map(menu);
+            loading_step++;
+            return false;
+        }
+        case 4: {
+            /* Step 4: Configure audio subsystem (no audible output yet) */
+            debugf("[LOAD] %lums: step 4: sound_init_mp3_playback\n", load_ms());
+            sound_init_mp3_playback();
+            mp3player_mute(false);
+            loading_step++;
+            return false;
+        }
+        case 5: {
+            /* Step 5: Start cover art decode and preload next track */
+            debugf("[LOAD] %lums: step 5: load_cover_art + preload_next\n", load_ms());
+            load_cover_art(menu->browser.directory);
+            preload_next_track(menu);
+            loading_step++;
+            return false;
+        }
+        default: {
+            /* Wait for minimum logo rotation AND cover art to finish */
+            bool logo_done = (logo_frame >= LOGO_MIN_FRAMES);
+            bool art_done = (cover_image != NULL) || !cover_art_expected || (cover_state == COVER_IDLE);
+            if (logo_frame % 30 == 0) {
+                debugf("[LOAD] %lums: waiting: frame=%d logo_done=%d art_done=%d cover_state=%d cover_image=%p expected=%d\n",
+                       load_ms(), logo_frame, logo_done, art_done, cover_state, cover_image, cover_art_expected);
+            }
+            return logo_done && art_done;
+        }
+    }
+}
+
 void view_music_player_init (menu_t *menu) {
-    mp3player_err_t err;
+    player_state = PLAYER_LOADING;
+    loading_step = 0;
+    logo_frame = 0;
+    load_start_ticks = TICKS_READ();
+
+    debugf("[LOAD] %lums: init started\n", 0UL);
 
     playback_mode = PLAYBACK_NORMAL;
     advance_failed = false;
-    ticker_offset = 0.0f;
 
-    /* Reset cover art state in case previous session was interrupted */
+
+    /* Reset cover art state */
     if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_abort();
     if (cover_state == COVER_LOADING_PNG) png_decoder_abort();
     cover_state = COVER_IDLE;
@@ -949,41 +1327,35 @@ void view_music_player_init (menu_t *menu) {
         cover_image = NULL;
     }
     cover_disp_size = 0;
+    cover_art_expected = false;
+    cover_first_load = true;
+    cover_art_source[0] = '\0';
     cover_dir_scan_active = false;
-
-    build_music_index_map(menu);
-
-    err = mp3player_init();
-    if (err != MP3PLAYER_OK) {
-        menu_show_error(menu, convert_error_message(err));
-        mp3player_deinit();
-        return;
-    }
-
-    path_t *path = path_clone_push(menu->browser.directory, menu->browser.entry->name);
-
-    err = mp3player_load(path_get(path));
-    if (err != MP3PLAYER_OK) {
-        menu_show_error(menu, convert_error_message(err));
-        mp3player_deinit();
-    } else {
-        sound_init_mp3_playback();
-        mp3player_mute(false);
-        err = mp3player_play();
-        if (err != MP3PLAYER_OK) {
-            menu_show_error(menu, convert_error_message(err));
-            mp3player_deinit();
-        } else {
-            load_cover_art(menu->browser.directory);
-        }
-    }
-
-    path_free(path);
 }
 
 void view_music_player_display (menu_t *menu, surface_t *display) {
-    process(menu);
+    if (player_state == PLAYER_LOADING) {
+        /* Poll cover art decoder if active */
+        if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_poll();
+        else if (cover_state == COVER_LOADING_PNG) png_decoder_poll();
 
+        bool done = loading_tick(menu);
+        draw_loading_screen(display);
+
+        if (done) {
+            debugf("[LOAD] %lums: transition to PLAYER_READY\n", load_ms());
+            mp3player_err_t play_err = mp3player_play();
+            if (play_err != MP3PLAYER_OK) {
+                debugf("[LOAD] %lums: mp3player_play failed: %d\n", load_ms(), play_err);
+                menu_show_error(menu, convert_error_message(play_err));
+            }
+            player_state = PLAYER_READY;
+            cover_first_load = false;
+        }
+        return;
+    }
+
+    process(menu);
     draw(menu, display);
 
     if (menu->next_mode != MENU_MODE_MUSIC_PLAYER) {

@@ -21,6 +21,7 @@ typedef struct {
     char title[ID3_FIELD_MAX];
     char artist[ID3_FIELD_MAX];
     char album[ID3_FIELD_MAX];
+    char year[8];
     int track_number;
     bool has_metadata;
     bool has_cover_art;

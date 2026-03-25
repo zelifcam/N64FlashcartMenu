@@ -155,6 +155,7 @@ static bool parse_id3v1(FILE *f, size_t file_size, id3_metadata_t *meta) {
     trim_copy(meta->title,  &tag[3],  30, ID3_FIELD_MAX);
     trim_copy(meta->artist, &tag[33], 30, ID3_FIELD_MAX);
     trim_copy(meta->album,  &tag[63], 30, ID3_FIELD_MAX);
+    trim_copy(meta->year,   &tag[93],  4, sizeof(meta->year));
 
     /* ID3v1.1: if byte 125 is zero and byte 126 is nonzero, it's the track number */
     if (tag[125] == 0 && tag[126] != 0) {
@@ -227,6 +228,13 @@ static char *match_frame_id(const uint8_t *id, int id_len, id3_metadata_t *meta)
         if (memcmp(id, "TAL", 3) == 0) return meta->album;
     }
     return NULL;
+}
+
+/** Check if a frame ID is a year/date frame. */
+static bool is_year_frame(const uint8_t *id, int id_len) {
+    if (id_len == 4) return memcmp(id, "TYER", 4) == 0 || memcmp(id, "TDRC", 4) == 0;
+    if (id_len == 3) return memcmp(id, "TYE", 3) == 0;
+    return false;
 }
 
 /** Check if a frame ID looks like a track number frame. */
@@ -394,8 +402,17 @@ static bool parse_id3v2(const uint8_t *buf, size_t buf_size, id3_metadata_t *met
             char tmp[16];
             decode_text_frame(data, data_len, tmp, sizeof(tmp));
             meta->track_number = atoi(tmp);
+        } else if (is_year_frame(fhdr, id_len) && !meta->year[0]) {
+            char tmp[32];
+            decode_text_frame(data, data_len, tmp, sizeof(tmp));
+            /* TDRC can be "2024-03-15", just take the first 4 chars (year) */
+            strncpy(meta->year, tmp, 4);
+            meta->year[4] = '\0';
         } else if (!meta->has_cover_art && is_apic_frame(fhdr, id_len)) {
-            extract_apic(data, data_len, id_len, meta);
+            debugf("[ID3] found APIC frame: size=%lu\n", (unsigned long)data_len);
+            bool apic_ok = extract_apic(data, data_len, id_len, meta);
+            debugf("[ID3] APIC extract: %s cover_path='%s'\n",
+                   apic_ok ? "OK" : "FAILED", meta->cover_art_path);
         }
 
         pos += frame_size;
@@ -421,20 +438,34 @@ void id3_parse(FILE *f, size_t file_size, id3_metadata_t *meta) {
     uint8_t header[10];
     if (fread(header, 1, 10, f) == 10 && memcmp(header, "ID3", 3) == 0) {
         size_t tag_size = read_syncsafe(&header[6]) + 10;
+        debugf("[ID3] found ID3v2 header: version=%d.%d tag_size=%lu\n",
+               header[3], header[4], (unsigned long)tag_size);
         if (tag_size <= ID3V2_MAX_TAG_SIZE) {
             heap_stats_t heap;
             sys_get_heap_stats(&heap);
             size_t free_mem = (size_t)(heap.total - heap.used);
+            debugf("[ID3] heap: free=%lu need=%lu\n",
+                   (unsigned long)free_mem, (unsigned long)(tag_size + 64 * 1024));
             uint8_t *tag_buf = (free_mem > tag_size + 64 * 1024) ? malloc(tag_size) : NULL;
             if (tag_buf) {
                 fseek(f, 0, SEEK_SET);
                 size_t rd = fread(tag_buf, 1, tag_size, f);
+                debugf("[ID3] read %lu of %lu bytes\n", (unsigned long)rd, (unsigned long)tag_size);
                 if (rd == tag_size) {
                     parse_id3v2(tag_buf, tag_size, meta);
+                } else {
+                    debugf("[ID3] short read, skipping ID3v2\n");
                 }
                 free(tag_buf);
+            } else {
+                debugf("[ID3] malloc failed or heap too low, skipping ID3v2\n");
             }
+        } else {
+            debugf("[ID3] tag_size %lu exceeds max %d, skipping\n",
+                   (unsigned long)tag_size, ID3V2_MAX_TAG_SIZE);
         }
+    } else {
+        debugf("[ID3] no ID3v2 header found\n");
     }
 
     /* Fall back to ID3v1 if nothing found */

@@ -337,4 +337,5 @@ void ui_component_value_editor(const char **header_text, const char **value_text
  */
 void ui_components_file_info_draw (char* filename, file_info_t *info);
 
+
 #endif /* UI_COMPONENTS_H__ */

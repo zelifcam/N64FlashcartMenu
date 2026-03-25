@@ -1,10 +1,15 @@
 /**
  * @file mp3_player.c
- * @brief MP3 Player component implementation
+ * @brief MP3 Player with seamless playback support
  * @ingroup ui_components
+ *
+ * Supports preloading the next track so the mixer never stops between
+ * tracks. When the current track's audio data is exhausted, the decoder
+ * seamlessly switches to the preloaded track inside the waveform callback.
  */
 
 #include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #include <libdragon.h>
@@ -22,149 +27,219 @@
 
 #define SEEK_PREDECODE_FRAMES   (5)
 
-/** @brief MP3 File Information Structure. */
+/** @brief Per-track file and decoder state. */
 typedef struct {
-    bool loaded; /**< Indicates if the MP3 file is loaded */
+    bool loaded;
+    FILE *f;
+    size_t file_size;
+    size_t data_start;
+    uint8_t buffer[16 * 1024];
+    uint8_t *buffer_ptr;
+    size_t buffer_left;
 
-    FILE *f; /**< File pointer */
-    size_t file_size; /**< Size of the file */
-    size_t data_start; /**< Start position of the data */
-    uint8_t buffer[16 * 1024]; /**< Buffer for reading data */
-    uint8_t *buffer_ptr; /**< Pointer to the current position in the buffer */
-    size_t buffer_left; /**< Amount of data left in the buffer */
+    mp3dec_t dec;
+    mp3dec_frame_info_t info;
 
-    mp3dec_t dec; /**< MP3 decoder */
-    mp3dec_frame_info_t info; /**< MP3 frame information */
+    int seek_predecode_frames;
+    float duration;
+    float bitrate;
 
-    int seek_predecode_frames; /**< Number of frames to pre-decode when seeking */
-    float duration; /**< Duration of the MP3 file */
-    float bitrate; /**< Bitrate of the MP3 file */
+    id3_metadata_t metadata;
+} mp3_track_t;
 
-    id3_metadata_t metadata; /**< ID3 tag metadata */
+/** @brief Player state with current + preloaded next track. */
+typedef struct {
+    mp3_track_t current;
+    mp3_track_t next;
+    bool next_ready;
+    bool track_advanced;  /* set when track crossover occurs */
 
-    waveform_t wave; /**< Waveform structure for playback */
+    waveform_t wave;
 } mp3player_t;
 
 static mp3player_t *p = NULL;
 
-/**
- * @brief Reset the MP3 decoder.
- */
-static void mp3player_reset_decoder (void) {
-    mp3dec_init(&p->dec);
-    p->seek_predecode_frames = 0;
-    p->buffer_ptr = p->buffer;
-    p->buffer_left = 0;
+
+static void track_reset_decoder (mp3_track_t *t) {
+    mp3dec_init(&t->dec);
+    t->seek_predecode_frames = 0;
+    t->buffer_ptr = t->buffer;
+    t->buffer_left = 0;
 }
 
-/**
- * @brief Fill the buffer with data from the MP3 file.
- */
-static void mp3player_fill_buffer (void) {
-    if (feof(p->f)) {
-        return;
+static void track_fill_buffer (mp3_track_t *t) {
+    if (feof(t->f)) return;
+
+    if (t->buffer_left >= ALIGN(MAX_FREE_FORMAT_FRAME_SIZE, FS_SECTOR_SIZE)) return;
+
+    if ((t->buffer_ptr != t->buffer) && (t->buffer_left > 0)) {
+        memmove(t->buffer, t->buffer_ptr, t->buffer_left);
+        t->buffer_ptr = t->buffer;
     }
 
-    if (p->buffer_left >= ALIGN(MAX_FREE_FORMAT_FRAME_SIZE, FS_SECTOR_SIZE)) {
-        return;
-    }
-
-    if ((p->buffer_ptr != p->buffer) && (p->buffer_left > 0)) {
-        memmove(p->buffer, p->buffer_ptr, p->buffer_left);
-        p->buffer_ptr = p->buffer;
-    }
-
-    p->buffer_left += fread(p->buffer + p->buffer_left, 1, sizeof(p->buffer) - p->buffer_left, p->f);
+    t->buffer_left += fread(t->buffer + t->buffer_left, 1, sizeof(t->buffer) - t->buffer_left, t->f);
 }
 
+static void track_calculate_duration (mp3_track_t *t, int samples) {
+    uint32_t frames;
+    int delay, padding;
+
+    long data_size = (t->file_size - t->data_start);
+    if (mp3dec_check_vbrtag((const uint8_t *)(t->buffer_ptr), t->info.frame_bytes, &frames, &delay, &padding) > 0) {
+        t->duration = (frames * samples) / (float)(t->info.hz);
+        t->bitrate = (data_size * 8) / t->duration;
+    } else {
+        t->bitrate = t->info.bitrate_kbps * 1000;
+        t->duration = data_size / (t->bitrate / 8);
+    }
+}
+
+static void track_unload (mp3_track_t *t) {
+    if (t->loaded) {
+        t->loaded = false;
+        fclose(t->f);
+    }
+}
+
+/** Load a track's file and find the first audio frame. Does not start playback. */
+static mp3player_err_t track_load (mp3_track_t *t, char *path) {
+    if (t->loaded) track_unload(t);
+
+    memset(t, 0, sizeof(*t));
+
+    if ((t->f = fopen(path, "rb")) == NULL) {
+        return MP3PLAYER_ERR_IO;
+    }
+    setbuf(t->f, NULL);
+
+    struct stat st;
+    if (fstat(fileno(t->f), &st)) {
+        fclose(t->f);
+        return MP3PLAYER_ERR_IO;
+    }
+    t->file_size = st.st_size;
+
+    debugf("[MP3] track_load: parsing ID3 for '%s' (size=%lu)\n", path, (unsigned long)t->file_size);
+    id3_parse(t->f, t->file_size, &t->metadata);
+    debugf("[MP3] track_load: ID3 result: has_metadata=%d has_cover_art=%d title='%s' artist='%s' cover_path='%s'\n",
+           t->metadata.has_metadata, t->metadata.has_cover_art,
+           t->metadata.title, t->metadata.artist, t->metadata.cover_art_path);
+
+    track_reset_decoder(t);
+
+    while (!(feof(t->f) && t->buffer_left == 0)) {
+        track_fill_buffer(t);
+
+        if (ferror(t->f)) {
+            fclose(t->f);
+            return MP3PLAYER_ERR_IO;
+        }
+
+        size_t id3v2_skip = mp3dec_skip_id3v2((const uint8_t *)(t->buffer_ptr), t->buffer_left);
+        if (id3v2_skip > 0) {
+            if (fseek(t->f, (-t->buffer_left) + id3v2_skip, SEEK_CUR)) {
+                fclose(t->f);
+                return MP3PLAYER_ERR_IO;
+            }
+            track_reset_decoder(t);
+            continue;
+        }
+
+        int samples = mp3dec_decode_frame(&t->dec, t->buffer_ptr, t->buffer_left, NULL, &t->info);
+        if (samples > 0) {
+            t->loaded = true;
+            t->data_start = ftell(t->f) - t->buffer_left + t->info.frame_offset;
+
+            t->buffer_ptr += t->info.frame_offset;
+            t->buffer_left -= t->info.frame_offset;
+
+            track_calculate_duration(t, samples);
+
+            return MP3PLAYER_OK;
+        }
+
+        t->buffer_ptr += t->info.frame_bytes;
+        t->buffer_left -= t->info.frame_bytes;
+    }
+
+    fclose(t->f);
+    return MP3PLAYER_ERR_INVALID_FILE;
+}
+
+static bool track_is_finished (mp3_track_t *t) {
+    return t->loaded && feof(t->f) && (t->buffer_left == 0);
+}
+
+
 /**
- * @brief Read waveform data for playback.
- * 
- * @param ctx Context pointer.
- * @param sbuf Sample buffer.
- * @param wpos Write position.
- * @param wlen Write length.
- * @param seeking Indicates if seeking is in progress.
+ * @brief Waveform read callback. Called by the mixer to get audio samples.
+ *
+ * When the current track runs out of data and a next track is preloaded,
+ * the crossover happens here: the next track becomes current and decoding
+ * continues without the mixer ever stopping.
  */
 static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int wlen, bool seeking) {
-    while (wlen > 0) {
-        mp3player_fill_buffer();
+    mp3_track_t *t = &p->current;
 
-        int samples = mp3dec_decode_frame(&p->dec, p->buffer_ptr, p->buffer_left, NULL, &p->info);
+    while (wlen > 0) {
+        track_fill_buffer(t);
+
+        int samples = mp3dec_decode_frame(&t->dec, t->buffer_ptr, t->buffer_left, NULL, &t->info);
 
         if (samples > 0) {
-            short *buffer = (short *) (samplebuffer_append(sbuf, samples));
+            short *buffer = (short *)(samplebuffer_append(sbuf, samples));
 
-            p->buffer_ptr += p->info.frame_offset;
-            p->buffer_left -= p->info.frame_offset;
+            t->buffer_ptr += t->info.frame_offset;
+            t->buffer_left -= t->info.frame_offset;
 
-            mp3dec_decode_frame(&p->dec, p->buffer_ptr, p->buffer_left, buffer, &p->info);
+            mp3dec_decode_frame(&t->dec, t->buffer_ptr, t->buffer_left, buffer, &t->info);
 
-            if (p->seek_predecode_frames > 0) {
-                p->seek_predecode_frames -= 1;
-                memset(buffer, 0, samples * sizeof(short) * p->info.channels);
+            if (t->seek_predecode_frames > 0) {
+                t->seek_predecode_frames -= 1;
+                memset(buffer, 0, samples * sizeof(short) * t->info.channels);
             }
 
             wlen -= samples;
         }
 
-        p->buffer_ptr += p->info.frame_bytes;
-        p->buffer_left -= p->info.frame_bytes;
+        t->buffer_ptr += t->info.frame_bytes;
+        t->buffer_left -= t->info.frame_bytes;
 
-        if (p->info.frame_bytes == 0) {
-            short *buffer = (short *) (samplebuffer_append(sbuf, wlen));
+        if (t->info.frame_bytes == 0) {
+            /* Current track exhausted. Try track crossover. */
+            if (p->next_ready && p->next.loaded) {
+                track_unload(&p->current);
+                memcpy(&p->current, &p->next, sizeof(mp3_track_t));
+                memset(&p->next, 0, sizeof(mp3_track_t));
+                p->next_ready = false;
+                p->track_advanced = true;
 
-            memset(buffer, 0, wlen * sizeof(short) * p->info.channels);
+                /* Update waveform params for new track */
+                p->wave.channels = p->current.info.channels;
+                p->wave.frequency = p->current.info.hz;
 
+                t = &p->current;
+                continue;
+            }
+
+            /* No next track available, fill with silence */
+            short *buffer = (short *)(samplebuffer_append(sbuf, wlen));
+            memset(buffer, 0, wlen * sizeof(short) * t->info.channels);
             wlen = 0;
         }
     }
 }
 
-/**
- * @brief Calculate the duration of the MP3 file.
- * 
- * @param samples Number of samples.
- */
-static void mp3player_calculate_duration (int samples) {
-    uint32_t frames;
-    int delay, padding;
 
-    long data_size = (p->file_size - p->data_start);
-    if (mp3dec_check_vbrtag((const uint8_t *) (p->buffer_ptr), p->info.frame_bytes, &frames, &delay, &padding) > 0) {
-        p->duration = (frames * samples) / (float) (p->info.hz);
-        p->bitrate = (data_size * 8) / p->duration;
-    } else {
-        p->bitrate = p->info.bitrate_kbps * 1000;
-        p->duration = data_size / (p->bitrate / 8);
-    }
-}
-
-/**
- * @brief Initialize the MP3 player mixer.
- */
 void mp3player_mixer_init (void) {
-    // NOTE: Deliberately setting max_frequency to twice of actual maximum samplerate of mp3 file.
-    //       It's tricking mixer into creating buffer long enough for appending data created by mp3dec_decode_frame.
-
     mixer_ch_set_limits(SOUND_MP3_PLAYER_CHANNEL, 16, 96000, 0);
 }
 
-/**
- * @brief Initialize the MP3 player.
- * 
- * @return mp3player_err_t Error code.
- */
 mp3player_err_t mp3player_init (void) {
     p = calloc(1, sizeof(mp3player_t));
+    if (p == NULL) return MP3PLAYER_ERR_OUT_OF_MEM;
 
-    if (p == NULL) {
-        return MP3PLAYER_ERR_OUT_OF_MEM;
-    }
-
-    mp3player_reset_decoder();
-
-    p->loaded = false;
+    track_reset_decoder(&p->current);
 
     p->wave = (waveform_t) {
         .name = "mp3player",
@@ -180,108 +255,43 @@ mp3player_err_t mp3player_init (void) {
     return MP3PLAYER_OK;
 }
 
-/**
- * @brief Deinitialize the MP3 player.
- */
 void mp3player_deinit (void) {
     mp3player_unload();
+    if (p->next.loaded) track_unload(&p->next);
+    p->next_ready = false;
     id3_free_cover_art();
     free(p);
     p = NULL;
 }
 
-/**
- * @brief Load an MP3 file.
- * 
- * @param path Path to the MP3 file.
- * @return mp3player_err_t Error code.
- */
 mp3player_err_t mp3player_load (char *path) {
-    if (p->loaded) {
-        mp3player_unload();
+    if (p->current.loaded) {
+        mp3player_stop();
+        track_unload(&p->current);
     }
+    /* Discard any preloaded next track */
+    if (p->next.loaded) track_unload(&p->next);
+    p->next_ready = false;
+    p->track_advanced = false;
 
-    if ((p->f = fopen(path, "rb")) == NULL) {
-        return MP3PLAYER_ERR_IO;
-    }
-    setbuf(p->f, NULL);
+    mp3player_err_t err = track_load(&p->current, path);
+    if (err != MP3PLAYER_OK) return err;
 
-    struct stat st;
-    if (fstat(fileno(p->f), &st)) {
-        fclose(p->f);
-        return MP3PLAYER_ERR_IO;
-    }
-    p->file_size = st.st_size;
+    p->wave.channels = p->current.info.channels;
+    p->wave.frequency = p->current.info.hz;
 
-    id3_parse(p->f, p->file_size, &p->metadata);
-
-    mp3player_reset_decoder();
-
-    while (!(feof(p->f) && p->buffer_left == 0)) {
-        mp3player_fill_buffer();
-
-        if (ferror(p->f)) {
-            fclose(p->f);
-            return MP3PLAYER_ERR_IO;
-        }
-
-        size_t id3v2_skip = mp3dec_skip_id3v2((const uint8_t *) (p->buffer_ptr), p->buffer_left);
-        if (id3v2_skip > 0) {
-            if (fseek(p->f, (-p->buffer_left) + id3v2_skip, SEEK_CUR)) {
-                fclose(p->f);
-                return MP3PLAYER_ERR_IO;
-            }
-            mp3player_reset_decoder();
-            continue;
-        }
-
-        int samples = mp3dec_decode_frame(&p->dec, p->buffer_ptr, p->buffer_left, NULL, &p->info);
-        if (samples > 0) {
-            p->loaded = true;
-            p->data_start = ftell(p->f) - p->buffer_left + p->info.frame_offset;
-
-            p->buffer_ptr += p->info.frame_offset;
-            p->buffer_left -= p->info.frame_offset;
-
-            p->wave.channels = p->info.channels;
-            p->wave.frequency = p->info.hz;
-
-            mp3player_calculate_duration(samples);
-
-            return MP3PLAYER_OK;
-        }
-
-        p->buffer_ptr += p->info.frame_bytes;
-        p->buffer_left -= p->info.frame_bytes;
-    }
-
-    if (fclose(p->f)) {
-        return MP3PLAYER_ERR_IO;
-    }
-
-    return MP3PLAYER_ERR_INVALID_FILE;
+    return MP3PLAYER_OK;
 }
 
-/**
- * @brief Unload the MP3 file.
- */
 void mp3player_unload (void) {
     mp3player_stop();
-    if (p->loaded) {
-        p->loaded = false;
-        fclose(p->f);
-    }
+    track_unload(&p->current);
 }
 
-/**
- * @brief Process the MP3 player.
- * 
- * @return mp3player_err_t Error code.
- */
 mp3player_err_t mp3player_process (void) {
-    if (!p || !p->loaded) return MP3PLAYER_OK;
+    if (!p || !p->current.loaded) return MP3PLAYER_OK;
 
-    if (ferror(p->f)) {
+    if (ferror(p->current.f)) {
         mp3player_unload();
         return MP3PLAYER_ERR_IO;
     }
@@ -293,59 +303,35 @@ mp3player_err_t mp3player_process (void) {
     return MP3PLAYER_OK;
 }
 
-/**
- * @brief Check if the MP3 player is playing.
- * 
- * @return true if playing, false otherwise.
- */
 bool mp3player_is_playing (void) {
     return mixer_ch_playing(SOUND_MP3_PLAYER_CHANNEL);
 }
 
-/**
- * @brief Check if the MP3 player has finished playing.
- * 
- * @return true if finished, false otherwise.
- */
 bool mp3player_is_finished (void) {
-    return p->loaded && feof(p->f) && (p->buffer_left == 0);
+    return p->current.loaded && feof(p->current.f) && (p->current.buffer_left == 0) && !p->next_ready;
 }
 
-/**
- * @brief Play the MP3 file.
- * 
- * @return mp3player_err_t Error code.
- */
 mp3player_err_t mp3player_play (void) {
-    if (!p->loaded) {
-        return MP3PLAYER_ERR_NO_FILE;
-    }
+    if (!p->current.loaded) return MP3PLAYER_ERR_NO_FILE;
+
     if (!mp3player_is_playing()) {
-        if (mp3player_is_finished()) {
-            if (fseek(p->f, p->data_start, SEEK_SET)) {
+        if (track_is_finished(&p->current) && !p->next_ready) {
+            if (fseek(p->current.f, p->current.data_start, SEEK_SET)) {
                 return MP3PLAYER_ERR_IO;
             }
-            mp3player_reset_decoder();
+            track_reset_decoder(&p->current);
         }
         mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
     }
     return MP3PLAYER_OK;
 }
 
-/**
- * @brief Stop the MP3 player.
- */
 void mp3player_stop (void) {
     if (mp3player_is_playing()) {
         mixer_ch_stop(SOUND_MP3_PLAYER_CHANNEL);
     }
 }
 
-/**
- * @brief Toggle the MP3 player between play and stop.
- * 
- * @return mp3player_err_t Error code.
- */
 mp3player_err_t mp3player_toggle (void) {
     if (mp3player_is_playing()) {
         mp3player_stop();
@@ -355,117 +341,83 @@ mp3player_err_t mp3player_toggle (void) {
     return MP3PLAYER_OK;
 }
 
-/**
- * @brief Mute or unmute the MP3 player.
- * 
- * @param mute True to mute, false to unmute.
- */
 void mp3player_mute (bool mute) {
     float volume = mute ? 0.0f : 1.0f;
     mixer_ch_set_vol(SOUND_MP3_PLAYER_CHANNEL, volume, volume);
 }
 
-/**
- * @brief Seek to a specific position in the MP3 file.
- * 
- * @param seconds Number of seconds to seek.
- * @return mp3player_err_t Error code.
- */
 mp3player_err_t mp3player_seek (int seconds) {
-    // NOTE: Rough approximation using average bitrate to calculate number of bytes to be skipped.
-    //       Good enough but not very accurate for variable bitrate files.
+    if (!p->current.loaded) return MP3PLAYER_ERR_NO_FILE;
 
-    if (!p->loaded) {
-        return MP3PLAYER_ERR_NO_FILE;
+    long bytes_to_move = (long)((p->current.bitrate * seconds) / 8);
+    if (bytes_to_move == 0) return MP3PLAYER_OK;
+
+    long position = (ftell(p->current.f) - p->current.buffer_left + bytes_to_move);
+    if (position < (long)(p->current.data_start)) {
+        position = p->current.data_start;
     }
 
-    long bytes_to_move = (long) ((p->bitrate * seconds) / 8);
-    if (bytes_to_move == 0) {
-        return MP3PLAYER_OK;
-    }
-
-    long position = (ftell(p->f) - p->buffer_left + bytes_to_move);
-    if (position < (long) (p->data_start)) {
-        position = p->data_start;
-    }
-
-    if (fseek(p->f, position, SEEK_SET)) {
+    if (fseek(p->current.f, position, SEEK_SET)) {
         return MP3PLAYER_ERR_IO;
     }
 
-    mp3player_reset_decoder();
-    mp3player_fill_buffer();
+    track_reset_decoder(&p->current);
+    track_fill_buffer(&p->current);
 
-    if (ferror(p->f)) {
-        return MP3PLAYER_ERR_IO;
-    }
+    if (ferror(p->current.f)) return MP3PLAYER_ERR_IO;
 
-    p->seek_predecode_frames = (position == p->data_start) ? 0 : SEEK_PREDECODE_FRAMES;
+    p->current.seek_predecode_frames = (position == p->current.data_start) ? 0 : SEEK_PREDECODE_FRAMES;
 
     return MP3PLAYER_OK;
 }
 
-/**
- * @brief Get the duration of the MP3 file.
- * 
- * @return float Duration in seconds.
- */
 float mp3player_get_duration (void) {
-    if (!p->loaded) {
-        return 0.0f;
-    }
-
-    return p->duration;
+    if (!p->current.loaded) return 0.0f;
+    return p->current.duration;
 }
 
-/**
- * @brief Get the bitrate of the MP3 file.
- * 
- * @return float Bitrate in kbps.
- */
 float mp3player_get_bitrate (void) {
-    if (!p->loaded) {
-        return 0.0f;
-    }
-
-    return p->bitrate;
+    if (!p->current.loaded) return 0.0f;
+    return p->current.bitrate;
 }
 
-/**
- * @brief Get the sample rate of the MP3 file.
- * 
- * @return int Sample rate in Hz.
- */
 int mp3player_get_samplerate (void) {
-    if (!p->loaded) {
-        return 0;
-    }
-
-    return p->info.hz;
+    if (!p->current.loaded) return 0;
+    return p->current.info.hz;
 }
 
-/**
- * @brief Get the progress of the MP3 file playback.
- * 
- * @return float Progress as a percentage.
- */
 float mp3player_get_progress (void) {
-    // NOTE: Rough approximation using file pointer instead of processed samples.
-    //       Good enough but not very accurate for variable bitrate files.
+    if (!p->current.loaded) return 0.0f;
 
-    if (!p->loaded) {
-        return 0.0f;
-    }
+    long data_size = p->current.file_size - p->current.data_start;
+    long data_consumed = ftell(p->current.f) - p->current.buffer_left;
+    long data_position = (data_consumed > p->current.data_start) ? (data_consumed - p->current.data_start) : 0;
 
-    long data_size = p->file_size - p->data_start;
-    long data_consumed = ftell(p->f) - p->buffer_left;
-    long data_position = (data_consumed > p->data_start) ? (data_consumed - p->data_start) : 0;
-
-    return data_position / (float) (data_size);
+    return data_position / (float)(data_size);
 }
 
 const id3_metadata_t *mp3player_get_metadata (void) {
     static const id3_metadata_t empty = {0};
-    if (!p || !p->loaded) return &empty;
-    return &p->metadata;
+    if (!p || !p->current.loaded) return &empty;
+    return &p->current.metadata;
+}
+
+mp3player_err_t mp3player_preload_next (char *path) {
+    /* Discard any existing preload */
+    if (p->next.loaded) track_unload(&p->next);
+    p->next_ready = false;
+
+    mp3player_err_t err = track_load(&p->next, path);
+    if (err != MP3PLAYER_OK) return err;
+
+    p->next_ready = true;
+    return MP3PLAYER_OK;
+}
+
+bool mp3player_did_advance (void) {
+    if (p && p->track_advanced) {
+        p->track_advanced = false;
+        return true;
+    }
+    return false;
 }
