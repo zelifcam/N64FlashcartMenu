@@ -333,19 +333,20 @@ static bool extract_apic(const uint8_t *data, size_t data_len, int id_len, id3_m
     }
 
     meta->has_cover_art = true;
+    meta->cover_art_size = remaining;
     strncpy(meta->cover_art_path, tmp_path, sizeof(meta->cover_art_path) - 1);
     meta->cover_art_path[sizeof(meta->cover_art_path) - 1] = '\0';
     return true;
 }
 
-static bool parse_id3v2(const uint8_t *buf, size_t buf_size, id3_metadata_t *meta) {
+static bool parse_id3v2(const uint8_t *buf, size_t buf_size, id3_metadata_t *meta, int flags) {
     if (buf_size < 10 || memcmp(buf, "ID3", 3) != 0) return false;
 
     uint8_t version = buf[3];
     if (version < 2 || version > 4) return false;
 
-    uint8_t flags = buf[5];
-    bool tag_unsync = (flags & 0x80) != 0;
+    uint8_t hdr_flags = buf[5];
+    bool tag_unsync = (hdr_flags & 0x80) != 0;
 
     size_t tag_size = read_syncsafe(&buf[6]) + 10;
     if (tag_size > buf_size) tag_size = buf_size;
@@ -366,7 +367,7 @@ static bool parse_id3v2(const uint8_t *buf, size_t buf_size, id3_metadata_t *met
 
     /* Skip extended header if present (v2.3/v2.4 only) */
     size_t pos = 10;
-    if (version >= 3 && (flags & 0x40)) {
+    if (version >= 3 && (hdr_flags & 0x40)) {
         if (pos + 4 > tag_size) goto done;
         size_t ext_size = (version == 4) ? read_syncsafe(&buf[pos]) : read_be32(&buf[pos]);
         pos += ext_size;
@@ -408,11 +409,8 @@ static bool parse_id3v2(const uint8_t *buf, size_t buf_size, id3_metadata_t *met
             /* TDRC can be "2024-03-15", just take the first 4 chars (year) */
             strncpy(meta->year, tmp, 4);
             meta->year[4] = '\0';
-        } else if (!meta->has_cover_art && is_apic_frame(fhdr, id_len)) {
-            debugf("[ID3] found APIC frame: size=%lu\n", (unsigned long)data_len);
-            bool apic_ok = extract_apic(data, data_len, id_len, meta);
-            debugf("[ID3] APIC extract: %s cover_path='%s'\n",
-                   apic_ok ? "OK" : "FAILED", meta->cover_art_path);
+        } else if ((flags & ID3_FLAG_EXTRACT_ART) && !meta->has_cover_art && is_apic_frame(fhdr, id_len)) {
+            extract_apic(data, data_len, id_len, meta);
         }
 
         pos += frame_size;
@@ -427,7 +425,7 @@ done:
 
 /* --- Public API --- */
 
-void id3_parse(FILE *f, size_t file_size, id3_metadata_t *meta) {
+void id3_parse(FILE *f, size_t file_size, id3_metadata_t *meta, int flags) {
     memset(meta, 0, sizeof(*meta));
 
     long saved = ftell(f);
@@ -438,34 +436,20 @@ void id3_parse(FILE *f, size_t file_size, id3_metadata_t *meta) {
     uint8_t header[10];
     if (fread(header, 1, 10, f) == 10 && memcmp(header, "ID3", 3) == 0) {
         size_t tag_size = read_syncsafe(&header[6]) + 10;
-        debugf("[ID3] found ID3v2 header: version=%d.%d tag_size=%lu\n",
-               header[3], header[4], (unsigned long)tag_size);
         if (tag_size <= ID3V2_MAX_TAG_SIZE) {
             heap_stats_t heap;
             sys_get_heap_stats(&heap);
             size_t free_mem = (size_t)(heap.total - heap.used);
-            debugf("[ID3] heap: free=%lu need=%lu\n",
-                   (unsigned long)free_mem, (unsigned long)(tag_size + 64 * 1024));
             uint8_t *tag_buf = (free_mem > tag_size + 64 * 1024) ? malloc(tag_size) : NULL;
             if (tag_buf) {
                 fseek(f, 0, SEEK_SET);
                 size_t rd = fread(tag_buf, 1, tag_size, f);
-                debugf("[ID3] read %lu of %lu bytes\n", (unsigned long)rd, (unsigned long)tag_size);
                 if (rd == tag_size) {
-                    parse_id3v2(tag_buf, tag_size, meta);
-                } else {
-                    debugf("[ID3] short read, skipping ID3v2\n");
+                    parse_id3v2(tag_buf, tag_size, meta, flags);
                 }
                 free(tag_buf);
-            } else {
-                debugf("[ID3] malloc failed or heap too low, skipping ID3v2\n");
             }
-        } else {
-            debugf("[ID3] tag_size %lu exceeds max %d, skipping\n",
-                   (unsigned long)tag_size, ID3V2_MAX_TAG_SIZE);
         }
-    } else {
-        debugf("[ID3] no ID3v2 header found\n");
     }
 
     /* Fall back to ID3v1 if nothing found */

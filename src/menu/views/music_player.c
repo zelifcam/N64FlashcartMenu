@@ -12,6 +12,14 @@
 #include "views.h"
 
 
+/* Uncomment to enable verbose loading/cover art debug output */
+#define MP3_PLAYER_DEBUG
+#ifdef MP3_PLAYER_DEBUG
+#define mp3_debugf(...) debugf(__VA_ARGS__)
+#else
+#define mp3_debugf(...) ((void)0)
+#endif
+
 #define SEEK_SECONDS            (5)
 #define SEEK_SECONDS_FAST       (60)
 #define COVER_ART_MAX_SIZE      (238)
@@ -24,7 +32,6 @@
 #define QUEUE_TEXT_WIDTH         (280)
 #define TICKER_SCROLL_SPEED     (0.5f)
 #define COVER_SCAN_MAX_ATTEMPTS (20)
-#define LOGO_MIN_FRAMES         (64)  /* two full rotations minimum */
 
 typedef enum {
     PLAYBACK_NORMAL,
@@ -50,12 +57,12 @@ typedef enum {
 
 static player_state_t player_state = PLAYER_LOADING;
 static int loading_step = 0;
+#ifdef MP3_PLAYER_DEBUG
 static uint32_t load_start_ticks = 0;
-
-/** Get milliseconds since loading started. */
 static unsigned long load_ms (void) {
     return TICKS_DISTANCE(load_start_ticks, TICKS_READ()) / (TICKS_PER_SECOND / 1000);
 }
+#endif
 
 static playback_mode_t playback_mode = PLAYBACK_NORMAL;
 static bool advance_failed = false;
@@ -167,7 +174,7 @@ static const char *queue_entry_name (menu_t *menu, int queue_idx, char *buf, siz
             struct stat st;
             if (fstat(fileno(f), &st) == 0) {
                 id3_metadata_t meta;
-                id3_parse(f, st.st_size, &meta);
+                id3_parse(f, st.st_size, &meta, 0);  /* text only, no APIC */
                 if (meta.has_metadata && meta.title[0]) {
                     strncpy(c->title, meta.title, ID3_FIELD_MAX - 1);
                     c->title[ID3_FIELD_MAX - 1] = '\0';
@@ -248,7 +255,7 @@ static bool png_dimensions_ok (const char *path, int max_dim) {
 static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
     cover_state = COVER_IDLE;
     if (err == JPEG_OK && image) {
-        debugf("[COVER] %lums: JPEG decode OK: %dx%d\n", load_ms(), image->width, image->height);
+        mp3_debugf("[COVER] %lums: JPEG decode OK: %dx%d\n", load_ms(), image->width, image->height);
         if (cover_image) {
             surface_free(cover_image);
             free(cover_image);
@@ -256,7 +263,7 @@ static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
         cover_image = image;
         cover_cache_blit_params();
     } else {
-        debugf("[COVER] %lums: JPEG decode FAILED (err %d), trying next\n", load_ms(), err);
+        mp3_debugf("[COVER] %lums: JPEG decode FAILED (err %d), trying next\n", load_ms(), err);
         try_next_cover_source();
     }
 }
@@ -264,7 +271,7 @@ static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
 static void cover_art_png_callback (png_err_t err, surface_t *image, void *data) {
     cover_state = COVER_IDLE;
     if (err == PNG_OK && image) {
-        debugf("[COVER] %lums: PNG decode OK: %dx%d\n", load_ms(), image->width, image->height);
+        mp3_debugf("[COVER] %lums: PNG decode OK: %dx%d\n", load_ms(), image->width, image->height);
         if (cover_image) {
             surface_free(cover_image);
             free(cover_image);
@@ -272,23 +279,23 @@ static void cover_art_png_callback (png_err_t err, surface_t *image, void *data)
         cover_image = image;
         cover_cache_blit_params();
     } else {
-        debugf("[COVER] %lums: PNG decode FAILED (err %d)\n", load_ms(), err);
+        mp3_debugf("[COVER] %lums: PNG decode FAILED (err %d)\n", load_ms(), err);
 
         /* If a .png temp file failed, the APIC data might actually be JPEG.
          * Try decoding as JPEG before giving up. */
         const id3_metadata_t *meta = mp3player_get_metadata();
         if (meta->has_cover_art && meta->cover_art_path[0]) {
-            debugf("[COVER] %lums: retrying embedded art as JPEG\n", load_ms());
+            mp3_debugf("[COVER] %lums: retrying embedded art as JPEG\n", load_ms());
             int max_size = cover_art_budget_size();
             cover_state = COVER_LOADING_JPEG;
             jpeg_err_t jerr = jpeg_decoder_start((char *)meta->cover_art_path, max_size, max_size,
                                                   (jpeg_callback_t *)cover_art_callback, NULL);
             if (jerr == JPEG_OK) {
-                debugf("[COVER] %lums: JPEG fallback decode started\n", load_ms());
+                mp3_debugf("[COVER] %lums: JPEG fallback decode started\n", load_ms());
                 return;
             }
             cover_state = COVER_IDLE;
-            debugf("[COVER] %lums: JPEG fallback also failed (err %d)\n", load_ms(), jerr);
+            mp3_debugf("[COVER] %lums: JPEG fallback also failed (err %d)\n", load_ms(), jerr);
         }
 
         try_next_cover_source();
@@ -302,21 +309,21 @@ static bool try_cover_path (const char *path, int max_size) {
     ext++;
 
     if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) {
-        debugf("[COVER] %lums: trying JPEG: %s (max %d)\n", load_ms(), path, max_size);
+        mp3_debugf("[COVER] %lums: trying JPEG: %s (max %d)\n", load_ms(), path, max_size);
         cover_state = COVER_LOADING_JPEG;
         jpeg_err_t err = jpeg_decoder_start((char *)path, max_size, max_size,
                                             (jpeg_callback_t *)cover_art_callback, NULL);
         if (err != JPEG_OK) {
             cover_state = COVER_IDLE;
-            debugf("[COVER] %lums: JPEG start FAILED: %s (err %d)\n", load_ms(), path, err);
+            mp3_debugf("[COVER] %lums: JPEG start FAILED: %s (err %d)\n", load_ms(), path, err);
             return false;
         }
-        debugf("[COVER] %lums: JPEG decode started\n", load_ms());
+        mp3_debugf("[COVER] %lums: JPEG decode started\n", load_ms());
         return true;
     } else if (strcasecmp(ext, "png") == 0) {
-        debugf("[COVER] %lums: trying PNG: %s (max %d)\n", load_ms(), path, max_size);
+        mp3_debugf("[COVER] %lums: trying PNG: %s (max %d)\n", load_ms(), path, max_size);
         if (!png_dimensions_ok(path, max_size)) {
-            debugf("[COVER] %lums: PNG too large, skipping: %s\n", load_ms(), path);
+            mp3_debugf("[COVER] %lums: PNG too large, skipping: %s\n", load_ms(), path);
             return false;
         }
         cover_state = COVER_LOADING_PNG;
@@ -324,10 +331,10 @@ static bool try_cover_path (const char *path, int max_size) {
                                           cover_art_png_callback, NULL);
         if (err != PNG_OK) {
             cover_state = COVER_IDLE;
-            debugf("[COVER] %lums: PNG start FAILED: %s (err %d)\n", load_ms(), path, err);
+            mp3_debugf("[COVER] %lums: PNG start FAILED: %s (err %d)\n", load_ms(), path, err);
             return false;
         }
-        debugf("[COVER] %lums: PNG decode started\n", load_ms());
+        mp3_debugf("[COVER] %lums: PNG decode started\n", load_ms());
         return true;
     }
     return false;
@@ -404,11 +411,11 @@ static void find_cover_art_source (path_t *directory, char *out_path, size_t out
     out_path[0] = '\0';
 
     const id3_metadata_t *meta = mp3player_get_metadata();
-    debugf("[COVER] %lums: find_source: has_cover_art=%d has_metadata=%d dir='%s'\n",
+    mp3_debugf("[COVER] %lums: find_source: has_cover_art=%d has_metadata=%d dir='%s'\n",
            load_ms(), meta->has_cover_art, meta->has_metadata, path_get(directory));
 
     if (meta->has_cover_art && meta->cover_art_path[0]) {
-        debugf("[COVER] %lums: find_source: embedded art at '%s'\n", load_ms(), meta->cover_art_path);
+        mp3_debugf("[COVER] %lums: find_source: embedded art at '%s'\n", load_ms(), meta->cover_art_path);
         strncpy(out_path, meta->cover_art_path, out_size - 1);
         out_path[out_size - 1] = '\0';
         return;
@@ -453,21 +460,20 @@ static void load_cover_art (path_t *directory) {
     char new_source[256];
     find_cover_art_source(directory, new_source, sizeof(new_source));
 
-    /* For embedded art, use a unique key per track so different tracks
-     * with different embedded art always reload. The temp file path is
-     * the same for all tracks, so we can't use it for comparison. */
+    /* For embedded art, use the APIC data size as the cache key.
+     * Same album tracks typically have identical embedded art (same size).
+     * Different albums will have different sizes, triggering a reload. */
     const id3_metadata_t *meta_src = mp3player_get_metadata();
     if (meta_src->has_cover_art && meta_src->cover_art_path[0]) {
-        /* "embedded:N" where N increments ensures no false cache hits */
-        static int embedded_counter = 0;
-        snprintf(new_source, sizeof(new_source), "embedded:%d", ++embedded_counter);
+        snprintf(new_source, sizeof(new_source), "embedded:%lu",
+                 (unsigned long)meta_src->cover_art_size);
     }
 
-    debugf("[COVER] %lums: source key: '%s'\n", load_ms(), new_source[0] ? new_source : "(none)");
+    mp3_debugf("[COVER] %lums: source key: '%s'\n", load_ms(), new_source[0] ? new_source : "(none)");
 
     /* If same source as current and we already have an image, skip reload */
     if (cover_image && new_source[0] && strcmp(new_source, cover_art_source) == 0) {
-        debugf("[COVER] %lums: same source as current, skipping reload\n", load_ms());
+        mp3_debugf("[COVER] %lums: same source as current, skipping reload\n", load_ms());
         return;
     }
 
@@ -1030,7 +1036,7 @@ static void draw (menu_t *menu, surface_t *d) {
         rdpq_mode_push();
         rdpq_set_mode_standard();
         rdpq_mode_filter(FILTER_BILINEAR);
-        rdpq_mode_combiner(RDPQ_COMBINER_TEX_FLAT);
+        rdpq_mode_combiner(RDPQ_COMBINER_TEX);
         rdpq_mode_blender(0);
         rdpq_tex_blit(cover_image, art_x, art_y, &(rdpq_blitparms_t){
             .s0 = cover_s0, .t0 = cover_t0,
@@ -1044,8 +1050,8 @@ static void draw (menu_t *menu, surface_t *d) {
         /* First load: show animated N64 logo as placeholder */
         logo_frame++;
 
-        /* If art arrived but logo hasn't completed one full loop, keep showing logo */
-        if (cover_image && logo_frame >= LOGO_MIN_FRAMES) {
+        /* Art arrived, switch from logo to image */
+        if (cover_image) {
             cover_first_load = false;
         } else {
             if (logo_blocks_built) {
@@ -1229,7 +1235,7 @@ static bool loading_tick (menu_t *menu) {
     switch (loading_step) {
         case 0: {
             /* Step 0: Build logo blocks centered on screen */
-            debugf("[LOAD] %lums: step 0: build logo blocks\n", load_ms());
+            mp3_debugf("[LOAD] %lums: step 0: build logo blocks\n", load_ms());
             if (logo_blocks_built) {
                 ui_components_n64_logo_free();
             }
@@ -1239,13 +1245,13 @@ static bool loading_tick (menu_t *menu) {
             int logo_s = COVER_ART_MAX_SIZE / 2;
             ui_components_n64_logo_init(DISPLAY_CENTER_X, ct + ch / 2, logo_s);
             logo_blocks_built = true;
-            debugf("[LOAD] %lums: step 0: done\n", load_ms());
+            mp3_debugf("[LOAD] %lums: step 0: done\n", load_ms());
             loading_step++;
             return false;
         }
         case 1: {
             /* Step 1: Init MP3 player */
-            debugf("[LOAD] %lums: step 1: mp3player_init\n", load_ms());
+            mp3_debugf("[LOAD] %lums: step 1: mp3player_init\n", load_ms());
             mp3player_err_t err = mp3player_init();
             if (err != MP3PLAYER_OK) {
                 menu_show_error(menu, convert_error_message(err));
@@ -1257,7 +1263,7 @@ static bool loading_tick (menu_t *menu) {
         }
         case 2: {
             /* Step 2: Load the track (don't play yet) */
-            debugf("[LOAD] %lums: step 2: mp3player_load '%s'\n", load_ms(), menu->browser.entry->name);
+            mp3_debugf("[LOAD] %lums: step 2: mp3player_load '%s'\n", load_ms(), menu->browser.entry->name);
             path_t *path = path_clone_push(menu->browser.directory, menu->browser.entry->name);
             mp3player_err_t err = mp3player_load(path_get(path));
             path_free(path);
@@ -1271,36 +1277,42 @@ static bool loading_tick (menu_t *menu) {
         }
         case 3: {
             /* Step 3: Build music index map */
-            debugf("[LOAD] %lums: step 3: build music index map (%ld entries)\n", load_ms(), (long)menu->browser.entries);
+            mp3_debugf("[LOAD] %lums: step 3: build music index map (%ld entries)\n", load_ms(), (long)menu->browser.entries);
             build_music_index_map(menu);
             loading_step++;
             return false;
         }
         case 4: {
             /* Step 4: Configure audio subsystem (no audible output yet) */
-            debugf("[LOAD] %lums: step 4: sound_init_mp3_playback\n", load_ms());
+            mp3_debugf("[LOAD] %lums: step 4: sound_init_mp3_playback\n", load_ms());
             sound_init_mp3_playback();
             mp3player_mute(false);
             loading_step++;
             return false;
         }
         case 5: {
-            /* Step 5: Start cover art decode and preload next track */
-            debugf("[LOAD] %lums: step 5: load_cover_art + preload_next\n", load_ms());
+            /* Step 5: Start cover art decode */
+            mp3_debugf("[LOAD] %lums: step 5: load_cover_art\n", load_ms());
             load_cover_art(menu->browser.directory);
-            preload_next_track(menu);
             loading_step++;
             return false;
         }
-        default: {
-            /* Wait for minimum logo rotation AND cover art to finish */
-            bool logo_done = (logo_frame >= LOGO_MIN_FRAMES);
-            bool art_done = (cover_image != NULL) || !cover_art_expected || (cover_state == COVER_IDLE);
-            if (logo_frame % 30 == 0) {
-                debugf("[LOAD] %lums: waiting: frame=%d logo_done=%d art_done=%d cover_state=%d cover_image=%p expected=%d\n",
-                       load_ms(), logo_frame, logo_done, art_done, cover_state, cover_image, cover_art_expected);
+        case 6: {
+            /* Step 6: Preload next track (after cover art decode starts).
+             * Must wait until cover art file is no longer being read,
+             * because preload's id3_parse can overwrite the temp file. */
+            bool art_reading = (cover_state == COVER_LOADING_JPEG || cover_state == COVER_LOADING_PNG);
+            if (!art_reading) {
+                mp3_debugf("[LOAD] %lums: step 6: preload_next_track\n", load_ms());
+                preload_next_track(menu);
+                loading_step++;
             }
-            return logo_done && art_done;
+            return false;
+        }
+        default: {
+            /* Transition as soon as cover art finishes (or no art expected) */
+            bool art_done = (cover_image != NULL) || !cover_art_expected || (cover_state == COVER_IDLE);
+            return art_done;
         }
     }
 }
@@ -1309,9 +1321,10 @@ void view_music_player_init (menu_t *menu) {
     player_state = PLAYER_LOADING;
     loading_step = 0;
     logo_frame = 0;
+#ifdef MP3_PLAYER_DEBUG
     load_start_ticks = TICKS_READ();
-
-    debugf("[LOAD] %lums: init started\n", 0UL);
+#endif
+    mp3_debugf("[LOAD] %lums: init started\n", 0UL);
 
     playback_mode = PLAYBACK_NORMAL;
     advance_failed = false;
@@ -1343,10 +1356,10 @@ void view_music_player_display (menu_t *menu, surface_t *display) {
         draw_loading_screen(display);
 
         if (done) {
-            debugf("[LOAD] %lums: transition to PLAYER_READY\n", load_ms());
+            mp3_debugf("[LOAD] %lums: transition to PLAYER_READY\n", load_ms());
             mp3player_err_t play_err = mp3player_play();
             if (play_err != MP3PLAYER_OK) {
-                debugf("[LOAD] %lums: mp3player_play failed: %d\n", load_ms(), play_err);
+                mp3_debugf("[LOAD] %lums: mp3player_play failed: %d\n", load_ms(), play_err);
                 menu_show_error(menu, convert_error_message(play_err));
             }
             player_state = PLAYER_READY;

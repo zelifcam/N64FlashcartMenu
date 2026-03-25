@@ -101,8 +101,9 @@ static void track_unload (mp3_track_t *t) {
     }
 }
 
-/** Load a track's file and find the first audio frame. Does not start playback. */
-static mp3player_err_t track_load (mp3_track_t *t, char *path) {
+/** Load a track's file and find the first audio frame. Does not start playback.
+ *  id3_flags controls what id3_parse extracts (e.g. ID3_FLAG_EXTRACT_ART). */
+static mp3player_err_t track_load (mp3_track_t *t, char *path, int id3_flags) {
     if (t->loaded) track_unload(t);
 
     memset(t, 0, sizeof(*t));
@@ -119,11 +120,7 @@ static mp3player_err_t track_load (mp3_track_t *t, char *path) {
     }
     t->file_size = st.st_size;
 
-    debugf("[MP3] track_load: parsing ID3 for '%s' (size=%lu)\n", path, (unsigned long)t->file_size);
-    id3_parse(t->f, t->file_size, &t->metadata);
-    debugf("[MP3] track_load: ID3 result: has_metadata=%d has_cover_art=%d title='%s' artist='%s' cover_path='%s'\n",
-           t->metadata.has_metadata, t->metadata.has_cover_art,
-           t->metadata.title, t->metadata.artist, t->metadata.cover_art_path);
+    id3_parse(t->f, t->file_size, &t->metadata, id3_flags);
 
     track_reset_decoder(t);
 
@@ -178,25 +175,27 @@ static bool track_is_finished (mp3_track_t *t) {
  * the crossover happens here: the next track becomes current and decoding
  * continues without the mixer ever stopping.
  */
+/* Decode into a cached stack buffer first, then memcpy to the uncached
+ * samplebuffer. Writing directly to uncached RDRAM is significantly slower
+ * on the VR4300 because each store bypasses the data cache. Decoding to a
+ * cached buffer and doing a single memcpy is faster overall. */
 static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int wlen, bool seeking) {
     mp3_track_t *t = &p->current;
+    int16_t pcm_buf[MINIMP3_MAX_SAMPLES_PER_FRAME];
 
     while (wlen > 0) {
         track_fill_buffer(t);
 
-        int samples = mp3dec_decode_frame(&t->dec, t->buffer_ptr, t->buffer_left, NULL, &t->info);
+        int samples = mp3dec_decode_frame(&t->dec, t->buffer_ptr, t->buffer_left, pcm_buf, &t->info);
 
         if (samples > 0) {
-            short *buffer = (short *)(samplebuffer_append(sbuf, samples));
-
-            t->buffer_ptr += t->info.frame_offset;
-            t->buffer_left -= t->info.frame_offset;
-
-            mp3dec_decode_frame(&t->dec, t->buffer_ptr, t->buffer_left, buffer, &t->info);
+            int pcm_bytes = samples * t->info.channels * sizeof(int16_t);
+            short *out = (short *)(samplebuffer_append(sbuf, samples));
+            memcpy(out, pcm_buf, pcm_bytes);
 
             if (t->seek_predecode_frames > 0) {
                 t->seek_predecode_frames -= 1;
-                memset(buffer, 0, samples * sizeof(short) * t->info.channels);
+                memset(out, 0, pcm_bytes);
             }
 
             wlen -= samples;
@@ -274,7 +273,7 @@ mp3player_err_t mp3player_load (char *path) {
     p->next_ready = false;
     p->track_advanced = false;
 
-    mp3player_err_t err = track_load(&p->current, path);
+    mp3player_err_t err = track_load(&p->current, path, ID3_FLAG_EXTRACT_ART);
     if (err != MP3PLAYER_OK) return err;
 
     p->wave.channels = p->current.info.channels;
@@ -407,7 +406,7 @@ mp3player_err_t mp3player_preload_next (char *path) {
     if (p->next.loaded) track_unload(&p->next);
     p->next_ready = false;
 
-    mp3player_err_t err = track_load(&p->next, path);
+    mp3player_err_t err = track_load(&p->next, path, 0);  /* no art extraction for preload */
     if (err != MP3PLAYER_OK) return err;
 
     p->next_ready = true;
