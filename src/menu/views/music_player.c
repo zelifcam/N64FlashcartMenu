@@ -439,11 +439,8 @@ static void load_cover_art (path_t *directory) {
                  (unsigned long)meta_src->cover_art_size);
     }
 
-
-
     /* If same source as current and we already have an image, skip reload */
     if (cover_image && new_source[0] && strcmp(new_source, cover_art_source) == 0) {
-
         return;
     }
 
@@ -1310,7 +1307,6 @@ void view_music_player_init (menu_t *menu) {
     loading_step = 0;
     playback_mode = PLAYBACK_NORMAL;
     advance_failed = false;
-
 
     /* Reset cover art state */
     if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_abort();
