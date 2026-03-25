@@ -94,6 +94,7 @@ Other license options may be available upon request with permissions of the orig
 * [mini.c](https://github.com/univrsal/mini.c) - [BSD 2-Clause License](https://github.com/univrsal/mini.c?tab=BSD-2-Clause-1-ov-file#readme)
 * [minimp3](https://github.com/lieff/minimp3) - [CC0 1.0 Universal](https://github.com/lieff/minimp3/blob/master/LICENSE)
 * [miniz](https://github.com/richgel999/miniz) - [MIT License](https://github.com/richgel999/miniz/blob/master/LICENSE)
+* [libjpeg](https://www.ijg.org/) - [IJG License](https://spdx.org/licenses/IJG.html) (Independent JPEG Group)
 
 ## Sounds
 See [License](https://pixabay.com/en/service/license-summary/) for the following sounds:

@@ -72,6 +72,7 @@ static void draw (menu_t *menu, surface_t *d) {
             "\tlibdragon (UNLICENSE License)\n"
             "\tlibspng (BSD 2-Clause License)\n"
             "\tmini.c (BSD 2-Clause License)\n"
+            "\tlibjpeg (IJG License)\n"
             "\tminimp3 (CC0 1.0 Universal)\n"
             "\tminiz (MIT License)"
         );
