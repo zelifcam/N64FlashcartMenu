@@ -45,24 +45,20 @@ static void jpeg_error_exit_ex (j_common_ptr cinfo) {
 }
 
 static void jpeg_decoder_deinit (bool free_image) {
-    if (decoder) {
-        if (decoder->row_buf) {
-            free(decoder->row_buf);
-        }
-        if (decoder->started) {
-            jpeg_abort_decompress(&decoder->cinfo);
-            jpeg_destroy_decompress(&decoder->cinfo);
-        }
-        if (decoder->f) {
-            fclose(decoder->f);
-        }
-        if (decoder->image && free_image) {
-            surface_free(decoder->image);
-            free(decoder->image);
-        }
-        free(decoder);
-        decoder = NULL;
+    if (!decoder) return;
+
+    free(decoder->row_buf);
+    if (decoder->started) {
+        jpeg_abort_decompress(&decoder->cinfo);
+        jpeg_destroy_decompress(&decoder->cinfo);
     }
+    if (decoder->f) fclose(decoder->f);
+    if (free_image && decoder->image) {
+        surface_free(decoder->image);
+        free(decoder->image);
+    }
+    free(decoder);
+    decoder = NULL;
 }
 
 

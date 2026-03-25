@@ -254,10 +254,8 @@ static void track_unload (audio_track_t *t) {
             drflac_close(t->flac);
             t->flac = NULL;
         }
-        if (t->flac_io) {
-            free(t->flac_io);
-            t->flac_io = NULL;
-        }
+        free(t->flac_io);
+        t->flac_io = NULL;
         /* With DR_FLAC_NO_STDIO, drflac_close only frees its context.
          * We close the FILE handle ourselves below. */
     }
@@ -265,10 +263,8 @@ static void track_unload (audio_track_t *t) {
         fclose(t->f);
         t->f = NULL;
     }
-    if (t->filebuf) {
-        free(t->filebuf);
-        t->filebuf = NULL;
-    }
+    free(t->filebuf);
+    t->filebuf = NULL;
 }
 
 static mp3player_err_t track_load_mp3 (audio_track_t *t, int id3_flags) {
@@ -451,6 +447,12 @@ static bool track_is_finished (audio_track_t *t) {
 }
 
 
+/* Fill the sample buffer with silence (used when track is unloaded or exhausted) */
+static void write_silence (samplebuffer_t *sbuf, int wlen, int channels) {
+    short *out = (short *)(samplebuffer_append(sbuf, wlen));
+    memset(out, 0, wlen * sizeof(short) * channels);
+}
+
 /* --- Waveform read callback --- */
 
 /* Decode into a cached stack buffer first, then memcpy to the uncached
@@ -460,16 +462,13 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
     audio_track_t *t = &p->current;
 
     if (!t->loaded) {
-        /* Track was unloaded while we were queued — write silence */
-        short *out = (short *)(samplebuffer_append(sbuf, wlen));
-        memset(out, 0, wlen * sizeof(short) * 2);
+        write_silence(sbuf, wlen, 2);
         return;
     }
 
     if (t->format == AUDIO_FORMAT_FLAC) {
         if (!t->flac) {
-            short *out = (short *)(samplebuffer_append(sbuf, wlen));
-            memset(out, 0, wlen * sizeof(short) * 2);
+            write_silence(sbuf, wlen, 2);
             return;
         }
 
@@ -533,8 +532,7 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
                     continue;
                 }
 
-                short *out = (short *)(samplebuffer_append(sbuf, wlen));
-                memset(out, 0, wlen * sizeof(short) * t->channels);
+                write_silence(sbuf, wlen, t->channels);
                 wlen = 0;
             }
         }
@@ -543,8 +541,7 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
 
     /* MP3 decode path */
     if (!t->f) {
-        short *out = (short *)(samplebuffer_append(sbuf, wlen));
-        memset(out, 0, wlen * sizeof(short) * 2);
+        write_silence(sbuf, wlen, 2);
         return;
     }
 

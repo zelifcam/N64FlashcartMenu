@@ -109,10 +109,17 @@ static bool cover_dir_scan_active = false;
 
 static void try_next_cover_source(void);
 
+/** Cancel any in-progress cover art decode. */
+static void abort_cover_decode (void) {
+    if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_abort();
+    if (cover_state == COVER_LOADING_PNG) png_decoder_abort();
+    cover_state = COVER_IDLE;
+}
+
 /** Build the music file index map and allocate the lazy ID3 cache. */
 static void build_music_index_map (menu_t *menu) {
-    if (music_indices) { free(music_indices); music_indices = NULL; }
-    if (queue_cache) { free(queue_cache); queue_cache = NULL; }
+    free(music_indices); music_indices = NULL;
+    free(queue_cache); queue_cache = NULL;
     music_count = 0;
     queue_cache_count = 0;
 
@@ -445,9 +452,7 @@ static void load_cover_art (path_t *directory) {
     }
 
     /* Abort any in-progress decode */
-    if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_abort();
-    if (cover_state == COVER_LOADING_PNG) png_decoder_abort();
-    cover_state = COVER_IDLE;
+    abort_cover_decode();
     cover_dir_scan_active = false;
 
     cover_art_expected = (new_source[0] != '\0');
@@ -533,11 +538,8 @@ static void build_shuffle_list (menu_t *menu) {
         }
     }
 
-    /* Free old list if any */
-    if (shuffle_list) {
-        free(shuffle_list);
-        shuffle_list = NULL;
-    }
+    free(shuffle_list);
+    shuffle_list = NULL;
 
     shuffle_count = 0;
     shuffle_pos = 0;
@@ -1163,9 +1165,7 @@ static void draw (menu_t *menu, surface_t *d) {
 }
 
 static void deinit (void) {
-    if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_abort();
-    if (cover_state == COVER_LOADING_PNG) png_decoder_abort();
-    cover_state = COVER_IDLE;
+    abort_cover_decode();
     if (cover_image) {
         surface_free(cover_image);
         free(cover_image);
@@ -1185,14 +1185,11 @@ static void deinit (void) {
     }
     cover_dir_scan_active = false;
 
-    if (shuffle_list) {
-        free(shuffle_list);
-        shuffle_list = NULL;
-    }
+    free(shuffle_list); shuffle_list = NULL;
     shuffle_count = 0;
 
-    if (music_indices) { free(music_indices); music_indices = NULL; }
-    if (queue_cache) { free(queue_cache); queue_cache = NULL; }
+    free(music_indices); music_indices = NULL;
+    free(queue_cache); queue_cache = NULL;
     music_count = 0;
     queue_cache_count = 0;
 
@@ -1309,9 +1306,7 @@ void view_music_player_init (menu_t *menu) {
     advance_failed = false;
 
     /* Reset cover art state */
-    if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_abort();
-    if (cover_state == COVER_LOADING_PNG) png_decoder_abort();
-    cover_state = COVER_IDLE;
+    abort_cover_decode();
     if (cover_image) {
         surface_free(cover_image);
         free(cover_image);
