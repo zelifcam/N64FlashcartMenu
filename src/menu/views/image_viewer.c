@@ -5,6 +5,7 @@
 #include "../jpeg_decoder.h"
 #include "../png_decoder.h"
 #include "views.h"
+#include "utils/fs.h"
 
 
 
@@ -37,7 +38,7 @@ static char *convert_error_message (int err, bool jpeg) {
     }
 }
 
-static void png_callback (png_err_t err, surface_t *decoded_image, void *callback_data) {
+static void png_cb (png_err_t err, surface_t *decoded_image, void *callback_data) {
     menu_t *menu = (menu_t *)(callback_data);
 
     image_loading = false;
@@ -49,7 +50,7 @@ static void png_callback (png_err_t err, surface_t *decoded_image, void *callbac
     }
 }
 
-static void jpeg_callback (jpeg_err_t err, surface_t *decoded_image, void *callback_data) {
+static void jpeg_cb (jpeg_err_t err, surface_t *decoded_image, void *callback_data) {
     menu_t *menu = (menu_t *)(callback_data);
 
     image_loading = false;
@@ -156,19 +157,19 @@ void view_image_viewer_init (menu_t *menu) {
     image = NULL;
 
     path_t *path = path_clone_push(menu->browser.directory, menu->browser.entry->name);
-    const char *ext = strrchr(menu->browser.entry->name, '.');
-    is_jpeg = (ext && (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0));
+    static const char *jpeg_extensions[] = { "jpg", "jpeg", NULL };
+    is_jpeg = file_has_extensions(menu->browser.entry->name, jpeg_extensions);
 
     if (is_jpeg) {
         jpeg_err_t err = jpeg_decoder_start(path_get(path), 640, 480,
-                                            jpeg_callback, menu);
+                                            jpeg_cb, menu);
         if (err != JPEG_OK) {
             image_loading = false;
             menu_show_error(menu, convert_error_message(err, true));
         }
     } else {
         png_err_t err = png_decoder_start(path_get(path), 640, 480,
-                                          png_callback, menu);
+                                          png_cb, menu);
         if (err != PNG_OK) {
             image_loading = false;
             menu_show_error(menu, convert_error_message(err, false));

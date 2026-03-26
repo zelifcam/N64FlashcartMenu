@@ -246,7 +246,7 @@ static bool png_dimensions_ok (const char *path, int max_dim) {
     return (w <= max_dim && h <= max_dim);
 }
 
-static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
+static void cover_art_cb (jpeg_err_t err, surface_t *image, void *data) {
     cover_state = COVER_IDLE;
     if (err == JPEG_OK && image) {
         if (cover_image) {
@@ -260,7 +260,7 @@ static void cover_art_callback (jpeg_err_t err, surface_t *image, void *data) {
     }
 }
 
-static void cover_art_png_callback (png_err_t err, surface_t *image, void *data) {
+static void cover_art_png_cb (png_err_t err, surface_t *image, void *data) {
     cover_state = COVER_IDLE;
     if (err == PNG_OK && image) {
         if (cover_image) {
@@ -277,7 +277,7 @@ static void cover_art_png_callback (png_err_t err, surface_t *image, void *data)
             int max_size = cover_art_budget_size();
             cover_state = COVER_LOADING_JPEG;
             jpeg_err_t jerr = jpeg_decoder_start((char *)meta->cover_art_path, max_size, max_size,
-                                                  cover_art_callback, NULL);
+                                                  cover_art_cb, NULL);
             if (jerr == JPEG_OK) {
                 return;
             }
@@ -289,27 +289,26 @@ static void cover_art_png_callback (png_err_t err, surface_t *image, void *data)
 }
 
 /** Try to load a cover art file. Returns true if decode started. */
-static bool try_cover_path (const char *path, int max_size) {
-    const char *ext = strrchr(path, '.');
-    if (!ext) return false;
-    ext++;
+static const char *jpeg_extensions[] = { "jpg", "jpeg", NULL };
+static const char *png_extensions[] = { "png", NULL };
 
-    if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) {
+static bool try_cover_path (const char *path, int max_size) {
+    if (file_has_extensions((char *)path, jpeg_extensions)) {
         cover_state = COVER_LOADING_JPEG;
         jpeg_err_t err = jpeg_decoder_start((char *)path, max_size, max_size,
-                                            cover_art_callback, NULL);
+                                            cover_art_cb, NULL);
         if (err != JPEG_OK) {
             cover_state = COVER_IDLE;
             return false;
         }
         return true;
-    } else if (strcasecmp(ext, "png") == 0) {
+    } else if (file_has_extensions((char *)path, png_extensions)) {
         if (!png_dimensions_ok(path, max_size)) {
             return false;
         }
         cover_state = COVER_LOADING_PNG;
         png_err_t err = png_decoder_start((char *)path, max_size, max_size,
-                                          cover_art_png_callback, NULL);
+                                          cover_art_png_cb, NULL);
         if (err != PNG_OK) {
             cover_state = COVER_IDLE;
             return false;
