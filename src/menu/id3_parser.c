@@ -105,6 +105,7 @@ static void utf16_to_utf8(const uint8_t *src, size_t src_len,
 
 /** Copy and trim leading/trailing whitespace and nulls from a tag field. */
 static void trim_copy(char *dst, const uint8_t *src, size_t len, size_t dst_size) {
+    if (dst_size == 0) return;
     while (len > 0 && (*src == ' ' || *src == '\0')) { src++; len--; }
     if (len >= dst_size) len = dst_size - 1;
     memcpy(dst, src, len);

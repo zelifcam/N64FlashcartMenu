@@ -1,6 +1,6 @@
 /**
  * @file id3_parser.h
- * @brief ID3 tag metadata parser for MP3 files
+ * @brief ID3 tag metadata parser for audio files
  * @ingroup menu
  *
  * Parses ID3v1, ID3v2.2, ID3v2.3, and ID3v2.4 tags to extract

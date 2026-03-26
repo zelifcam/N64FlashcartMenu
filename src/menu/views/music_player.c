@@ -277,7 +277,7 @@ static void cover_art_png_callback (png_err_t err, surface_t *image, void *data)
             int max_size = cover_art_budget_size();
             cover_state = COVER_LOADING_JPEG;
             jpeg_err_t jerr = jpeg_decoder_start((char *)meta->cover_art_path, max_size, max_size,
-                                                  (jpeg_callback_t *)cover_art_callback, NULL);
+                                                  cover_art_callback, NULL);
             if (jerr == JPEG_OK) {
                 return;
             }
@@ -297,7 +297,7 @@ static bool try_cover_path (const char *path, int max_size) {
     if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) {
         cover_state = COVER_LOADING_JPEG;
         jpeg_err_t err = jpeg_decoder_start((char *)path, max_size, max_size,
-                                            (jpeg_callback_t *)cover_art_callback, NULL);
+                                            cover_art_callback, NULL);
         if (err != JPEG_OK) {
             cover_state = COVER_IDLE;
             return false;
@@ -466,7 +466,6 @@ static void load_cover_art (path_t *directory) {
             cover_image = NULL;
         }
         cover_disp_size = 0;
-        cover_art_expected = (new_source[0] != '\0');
     }
 
     if (!cover_art_expected) {

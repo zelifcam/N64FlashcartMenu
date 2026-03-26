@@ -107,9 +107,6 @@ static void draw (menu_t *menu, surface_t *d) {
         float scale_x = (float)d->width / image->width;
         float scale_y = (float)d->height / image->height;
         float scale = (scale_x < scale_y) ? scale_x : scale_y;
-        if (scale > 1.0f && image->width >= d->width && image->height >= d->height) {
-            scale = 1.0f;  /* don't upscale images that already fill the screen */
-        }
         int disp_w = (int)(image->width * scale);
         int disp_h = (int)(image->height * scale);
         int x = (d->width - disp_w) / 2;

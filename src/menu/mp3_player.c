@@ -30,7 +30,7 @@
 #include <dr_flac/dr_flac.h>
 
 #define SEEK_PREDECODE_FRAMES   (5)
-#define FLAC_READ_SAMPLES       (1152)  /* samples per wave_read iteration */
+#define FLAC_READ_FRAMES       (1152)  /* samples per wave_read iteration */
 #define FLAC_IO_BUFFER_SIZE     (8 * 1024)
 
 /* Guard debug output behind the same flag used in music_player.c.
@@ -62,6 +62,7 @@ typedef struct {
     /* Common state */
     FILE *f;
     size_t file_size;
+    volatile long file_pos;  /* updated in wave_read, read from main thread */
     int channels;
     int samplerate;
     int seek_predecode_frames;
@@ -92,7 +93,7 @@ typedef struct {
     audio_track_t current;
     audio_track_t next;
     bool next_ready;
-    bool track_advanced;
+    volatile bool track_advanced;
     char next_path[256];  /* path of preloaded track for matching */
 
     waveform_t wave;
@@ -128,10 +129,13 @@ static drflac_bool32 drflac_tell_cb (void *userdata, drflac_int64 *pCursor) {
 static void flac_parse_vorbis_comment (const char *comment, id3_metadata_t *meta) {
     if (strncasecmp(comment, "TITLE=", 6) == 0) {
         strncpy(meta->title, comment + 6, ID3_FIELD_MAX - 1);
+        meta->title[ID3_FIELD_MAX - 1] = '\0';
     } else if (strncasecmp(comment, "ARTIST=", 7) == 0) {
         strncpy(meta->artist, comment + 7, ID3_FIELD_MAX - 1);
+        meta->artist[ID3_FIELD_MAX - 1] = '\0';
     } else if (strncasecmp(comment, "ALBUM=", 6) == 0) {
         strncpy(meta->album, comment + 6, ID3_FIELD_MAX - 1);
+        meta->album[ID3_FIELD_MAX - 1] = '\0';
     } else if (strncasecmp(comment, "DATE=", 5) == 0) {
         strncpy(meta->year, comment + 5, sizeof(meta->year) - 1);
         meta->year[4] = '\0';  /* just the year portion */
@@ -230,11 +234,15 @@ static void mp3_calculate_duration (audio_track_t *t, int samples) {
 
     long data_size = (t->file_size - t->data_start);
     if (mp3dec_check_vbrtag((const uint8_t *)(t->buffer_ptr), t->info.frame_bytes, &frames, &delay, &padding) > 0) {
-        t->duration = (frames * samples) / (float)(t->info.hz);
-        t->bitrate = (data_size * 8) / t->duration;
+        if (t->info.hz > 0) {
+            t->duration = (frames * samples) / (float)(t->info.hz);
+            t->bitrate = (data_size * 8) / t->duration;
+        }
     } else {
         t->bitrate = t->info.bitrate_kbps * 1000;
-        t->duration = data_size / (t->bitrate / 8);
+        if (t->bitrate > 0) {
+            t->duration = data_size / (t->bitrate / 8);
+        }
     }
 }
 
@@ -299,7 +307,8 @@ static mp3player_err_t track_load_mp3 (audio_track_t *t, int id3_flags) {
         int samples = mp3dec_decode_frame(&t->dec, t->buffer_ptr, t->buffer_left, NULL, &t->info);
         if (samples > 0) {
             t->loaded = true;
-            t->data_start = ftell(t->f) - t->buffer_left + t->info.frame_offset;
+            t->file_pos = ftell(t->f);
+            t->data_start = t->file_pos - t->buffer_left + t->info.frame_offset;
 
             t->buffer_ptr += t->info.frame_offset;
             t->buffer_left -= t->info.frame_offset;
@@ -478,8 +487,8 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
 
         /* Fixed-size stack buffer. When downsampling, we reduce the output
          * frame count so the raw read (output * downsample) fits in the buffer. */
-        int16_t pcm_buf[FLAC_READ_SAMPLES * 2];  /* max 2 channels */
-        int max_output = FLAC_READ_SAMPLES / t->downsample;
+        int16_t pcm_buf[FLAC_READ_FRAMES * 2];  /* max 2 channels */
+        int max_output = FLAC_READ_FRAMES / t->downsample;
         if (max_output < 1) max_output = 1;
 
         while (wlen > 0) {
@@ -529,9 +538,6 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
                     p->next_ready = false;
                     p->track_advanced = true;
 
-                    p->wave.channels = p->current.channels;
-                    p->wave.frequency = p->current.samplerate;
-
                     t = &p->current;
                     continue;
                 }
@@ -553,6 +559,7 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
 
     while (wlen > 0) {
         mp3_fill_buffer(t);
+        t->file_pos = ftell(t->f);
 
         int samples = mp3dec_decode_frame(&t->dec, t->buffer_ptr, t->buffer_left, pcm_buf, &t->info);
 
@@ -582,9 +589,6 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
                 memset(&p->next, 0, sizeof(audio_track_t));
                 p->next_ready = false;
                 p->track_advanced = true;
-
-                p->wave.channels = p->current.channels;
-                p->wave.frequency = p->current.samplerate;
 
                 t = &p->current;
                 continue;
@@ -661,6 +665,13 @@ mp3player_err_t mp3player_process (void) {
     if (p->current.format == AUDIO_FORMAT_MP3 && p->current.f && ferror(p->current.f)) {
         mp3player_unload();
         return MP3PLAYER_ERR_IO;
+    }
+
+    /* If wave_read performed a crossover, update the waveform format
+     * from the main thread (wave_read runs in the audio callback). */
+    if (p->track_advanced) {
+        p->wave.channels = p->current.channels;
+        p->wave.frequency = p->current.samplerate;
     }
 
     /* If the track ended and a preloaded next is waiting but the mixer
@@ -779,6 +790,7 @@ mp3player_err_t mp3player_seek (int seconds) {
 
     mp3_reset_decoder(&p->current);
     mp3_fill_buffer(&p->current);
+    p->current.file_pos = ftell(p->current.f);
 
     if (ferror(p->current.f)) return MP3PLAYER_ERR_IO;
 
@@ -820,7 +832,8 @@ float mp3player_get_progress (void) {
         progress = (float)p->current.current_pcm_frame / (float)p->current.total_pcm_frames;
     } else {
         long data_size = p->current.file_size - p->current.data_start;
-        long data_consumed = ftell(p->current.f) - p->current.buffer_left;
+        if (data_size <= 0) return 0.0f;
+        long data_consumed = p->current.file_pos - p->current.buffer_left;
         long data_position = (data_consumed > p->current.data_start) ? (data_consumed - p->current.data_start) : 0;
         progress = data_position / (float)(data_size);
     }
