@@ -18,7 +18,7 @@ N64_ROM_RTC = 1
 N64_ROM_REGIONFREE = 1
 N64_ROM_REGION = E
 
-N64_CFLAGS += -iquote $(SOURCE_DIR) -iquote $(ASSETS_DIR) -I $(SOURCE_DIR)/libs -isystem $(SOURCE_DIR)/libs/miniz -isystem $(SOURCE_DIR)/libs/libjpeg -flto=auto $(FLAGS)
+N64_CFLAGS += -iquote $(SOURCE_DIR) -iquote $(ASSETS_DIR) -I $(SOURCE_DIR)/libs -isystem $(SOURCE_DIR)/libs/miniz -isystem $(SOURCE_DIR)/libs/libjpeg-turbo -flto=auto $(FLAGS)
 
 SRCS = \
 	main.c \
@@ -35,32 +35,35 @@ SRCS = \
 	flashcart/sc64/sc64_ll.c \
 	flashcart/sc64/sc64.c \
 	libs/libspng/spng/spng.c \
-	libs/libjpeg/jaricom.c \
-	libs/libjpeg/jcomapi.c \
-	libs/libjpeg/jdapimin.c \
-	libs/libjpeg/jdapistd.c \
-	libs/libjpeg/jdarith.c \
-	libs/libjpeg/jdatasrc.c \
-	libs/libjpeg/jdcoefct.c \
-	libs/libjpeg/jdcolor.c \
-	libs/libjpeg/jddctmgr.c \
-	libs/libjpeg/jdhuff.c \
-	libs/libjpeg/jdinput.c \
-	libs/libjpeg/jdmainct.c \
-	libs/libjpeg/jdmarker.c \
-	libs/libjpeg/jdmaster.c \
-	libs/libjpeg/jdmerge.c \
-	libs/libjpeg/jdpostct.c \
-	libs/libjpeg/jdsample.c \
-	libs/libjpeg/jerror.c \
-	libs/libjpeg/jidctflt.c \
-	libs/libjpeg/jidctfst.c \
-	libs/libjpeg/jidctint.c \
-	libs/libjpeg/jmemmgr.c \
-	libs/libjpeg/jmemnobs.c \
-	libs/libjpeg/jquant1.c \
-	libs/libjpeg/jquant2.c \
-	libs/libjpeg/jutils.c \
+	libs/libjpeg-turbo/jaricom.c \
+	libs/libjpeg-turbo/jcomapi.c \
+	libs/libjpeg-turbo/jdapimin.c \
+	libs/libjpeg-turbo/jdapistd.c \
+	libs/libjpeg-turbo/jdarith.c \
+	libs/libjpeg-turbo/jdatasrc.c \
+	libs/libjpeg-turbo/jdcoefct.c \
+	libs/libjpeg-turbo/jdcolor.c \
+	libs/libjpeg-turbo/jddctmgr.c \
+	libs/libjpeg-turbo/jdhuff.c \
+	libs/libjpeg-turbo/jdinput.c \
+	libs/libjpeg-turbo/jdmainct.c \
+	libs/libjpeg-turbo/jdmarker.c \
+	libs/libjpeg-turbo/jdmaster.c \
+	libs/libjpeg-turbo/jdmerge.c \
+	libs/libjpeg-turbo/jdpostct.c \
+	libs/libjpeg-turbo/jdsample.c \
+	libs/libjpeg-turbo/jerror.c \
+	libs/libjpeg-turbo/jidctflt.c \
+	libs/libjpeg-turbo/jidctfst.c \
+	libs/libjpeg-turbo/jidctint.c \
+	libs/libjpeg-turbo/jmemmgr.c \
+	libs/libjpeg-turbo/jmemnobs.c \
+	libs/libjpeg-turbo/jquant1.c \
+	libs/libjpeg-turbo/jquant2.c \
+	libs/libjpeg-turbo/jutils.c \
+	libs/libjpeg-turbo/jdphuff.c \
+	libs/libjpeg-turbo/jidctred.c \
+	libs/libjpeg-turbo/jsimd_none.c \
 	libs/mini.c/src/mini.c \
 	libs/miniz/miniz_tdef.c \
 	libs/miniz/miniz_tinfl.c \
