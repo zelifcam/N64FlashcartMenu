@@ -27,7 +27,7 @@
 
 #define DR_FLAC_IMPLEMENTATION
 #define DR_FLAC_NO_STDIO  /* we use our own file I/O callbacks */
-#include <dr_flac/dr_flac.h>
+#include <dr_libs/dr_flac.h>
 
 #define SEEK_PREDECODE_FRAMES   (5)
 #define FLAC_READ_FRAMES       (1152)  /* samples per wave_read iteration */
