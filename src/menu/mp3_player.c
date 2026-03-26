@@ -31,6 +31,7 @@
 
 #define SEEK_PREDECODE_FRAMES   (5)
 #define FLAC_READ_SAMPLES       (1152)  /* samples per wave_read iteration */
+#define FLAC_IO_BUFFER_SIZE     (8 * 1024)
 
 /* Guard debug output behind the same flag used in music_player.c.
  * Compiles to nothing in release builds. */
@@ -187,7 +188,10 @@ static void flac_metadata_callback (void *userdata, drflac_metadata *metadata) {
 
             FILE *out = fopen(tmp_path, "wb");
             if (out) {
-                fwrite(pic_data, 1, pic_size, out);
+                if (fwrite(pic_data, 1, pic_size, out) != pic_size) {
+                    fclose(out);
+                    return;
+                }
                 fclose(out);
                 strncpy(meta->cover_art_path, tmp_path, sizeof(meta->cover_art_path) - 1);
                 meta->cover_art_path[sizeof(meta->cover_art_path) - 1] = '\0';
@@ -411,9 +415,9 @@ static mp3player_err_t track_load (audio_track_t *t, char *path, int id3_flags) 
     /* FLAC benefits from buffered I/O since dr_flac does many small reads
      * during seek table scanning. MP3 manages its own read buffer. */
     if (t->format == AUDIO_FORMAT_FLAC) {
-        t->filebuf = malloc(8 * 1024);
+        t->filebuf = malloc(FLAC_IO_BUFFER_SIZE);
         if (t->filebuf) {
-            setvbuf(t->f, t->filebuf, _IOFBF, 8 * 1024);
+            setvbuf(t->f, t->filebuf, _IOFBF, FLAC_IO_BUFFER_SIZE);
         }
     } else {
         setbuf(t->f, NULL);
@@ -619,6 +623,7 @@ mp3player_err_t mp3player_init (void) {
 }
 
 void mp3player_deinit (void) {
+    if (!p) return;
     mp3player_unload();
     if (p->next.loaded) track_unload(&p->next);
     p->next_ready = false;
@@ -857,7 +862,9 @@ mp3player_err_t mp3player_play_preloaded (void) {
     mp3player_stop();
     track_unload(&p->current);
 
+    ptrdiff_t buf_off = p->next.buffer_ptr - p->next.buffer;
     memcpy(&p->current, &p->next, sizeof(audio_track_t));
+    p->current.buffer_ptr = p->current.buffer + buf_off;
     memset(&p->next, 0, sizeof(audio_track_t));
     p->next_ready = false;
     p->next_path[0] = '\0';

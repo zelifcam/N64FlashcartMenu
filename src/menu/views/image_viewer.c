@@ -1,6 +1,5 @@
 #include <stdlib.h>
 #include <string.h>
-#include <malloc.h>
 #include "../sound.h"
 
 #include "../jpeg_decoder.h"
@@ -10,9 +9,9 @@
 #ifdef HEAP_DEBUG
 #define heap_debugf(tag) do { \
     heap_stats_t _h; sys_get_heap_stats(&_h); \
-    debugf("[HEAP] %-30s used=%lu free=%lu\n", \
-           (tag), (unsigned long)_h.used, \
-           (unsigned long)(_h.total - _h.used)); \
+    debugf("[HEAP] %-30s used=%u free=%u\n", \
+           (tag), (unsigned)_h.used, \
+           (unsigned)(_h.total - _h.used)); \
 } while(0)
 #else
 #define heap_debugf(tag) ((void)0)
@@ -31,7 +30,7 @@ static char *convert_error_message (int err, bool jpeg) {
         switch ((jpeg_err_t)err) {
             case JPEG_ERR_INT: return "Internal JPEG decoder error";
             case JPEG_ERR_BUSY: return "JPEG decode already in process";
-            case JPEG_ERR_OUT_OF_MEM: return "JPEG decode failed due to insufficient memory";
+            case JPEG_ERR_OUT_OF_MEM: return "Image too large for available memory.\nTry using baseline (non-progressive) JPEG.";
             case JPEG_ERR_NO_FILE: return "JPEG decoder couldn't open file";
             case JPEG_ERR_BAD_FILE: return "Invalid JPEG file";
             default: return "Unknown JPEG decoder error";
@@ -104,13 +103,26 @@ static void draw (menu_t *menu, surface_t *d) {
     } else {
         rdpq_attach_clear(d, NULL);
 
-        uint16_t x = (d->width / 2) - (image->width / 2);
-        uint16_t y = (d->height / 2) - (image->height / 2);
+        /* Scale image to fit screen, preserving aspect ratio */
+        float scale_x = (float)d->width / image->width;
+        float scale_y = (float)d->height / image->height;
+        float scale = (scale_x < scale_y) ? scale_x : scale_y;
+        if (scale > 1.0f && image->width >= d->width && image->height >= d->height) {
+            scale = 1.0f;  /* don't upscale images that already fill the screen */
+        }
+        int disp_w = (int)(image->width * scale);
+        int disp_h = (int)(image->height * scale);
+        int x = (d->width - disp_w) / 2;
+        int y = (d->height - disp_h) / 2;
 
-        rdpq_mode_push();
-            rdpq_set_mode_copy(false);
-            rdpq_tex_blit(image, x, y, NULL);
-        rdpq_mode_pop();
+        rdpq_set_mode_standard();
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_mode_combiner(RDPQ_COMBINER_TEX);
+        rdpq_tex_blit(image, x, y, &(rdpq_blitparms_t){
+            .scale_x = scale,
+            .scale_y = scale,
+            .filtering = true,
+        });
 
         if (show_message) {
             ui_components_messagebox_draw(

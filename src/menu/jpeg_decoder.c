@@ -47,6 +47,7 @@ static void jpeg_error_exit_ex (j_common_ptr cinfo) {
 static void jpeg_decoder_deinit (bool free_image) {
     if (!decoder) return;
 
+
     free(decoder->row_buf);
     if (decoder->started) {
         jpeg_abort_decompress(&decoder->cinfo);
@@ -98,25 +99,25 @@ jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
      * before outputting any scanlines. Estimate the coefficient buffer size
      * (2x to account for libjpeg internal overhead) and reject if it won't
      * fit, before jpeg_start_decompress does the huge allocation. */
-    if (jpeg_has_multiple_scans(&decoder->cinfo)) {
-        size_t coeff_size = (size_t)decoder->cinfo.image_width
-                          * decoder->cinfo.image_height
-                          * decoder->cinfo.num_components * sizeof(JCOEF) * 2;
-        heap_stats_t heap;
-        sys_get_heap_stats(&heap);
-        size_t available = heap.total - heap.used;
-        if (coeff_size + 128 * 1024 > available) {
-            jpeg_decoder_deinit(false);
-            return JPEG_ERR_OUT_OF_MEM;
-        }
-    }
-
     /* Pick the best DCT scale that fits within max dimensions AND
      * available heap. Try the largest scale first, fall back to smaller
-     * until the output surface + row buffer + headroom fits in memory. */
+     * until the output surface + row buffer + headroom fits in memory.
+     * Progressive JPEGs also need a coefficient buffer inside
+     * jpeg_start_decompress — account for that cost here. */
+    bool is_progressive = jpeg_has_multiple_scans(&decoder->cinfo);
+    size_t coeff_cost = 0;
+    if (is_progressive) {
+        coeff_cost = (size_t)decoder->cinfo.image_width
+                   * decoder->cinfo.image_height
+                   * decoder->cinfo.num_components * sizeof(JCOEF) * 2;
+    }
+
     decoder->cinfo.dct_method = JDCT_IFAST;
     bool fits = false;
-    for (int denom = 1; denom <= 8; denom *= 2) {
+    /* Progressive JPEGs need large internal coefficient buffers.
+     * Start at denom=2 to halve their memory footprint. */
+    int start_denom = is_progressive ? 2 : 1;
+    for (int denom = start_denom; denom <= 8; denom *= 2) {
         decoder->cinfo.scale_num   = 1;
         decoder->cinfo.scale_denom = denom;
         jpeg_calc_output_dimensions(&decoder->cinfo);
@@ -143,12 +144,15 @@ jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
          * upsample, ~10 rows of working memory at output width). */
         size_t jpeg_cost = (size_t)out_w * comps * 12;
         size_t surf_size = (size_t)dst_w * dst_h * 2;
+        /* Progressive: coefficient buffer is constant regardless of scale
+         * (it's based on source dimensions, not output). */
+        size_t total_cost = jpeg_cost + surf_size + coeff_cost + 64 * 1024;
 
         heap_stats_t heap;
         sys_get_heap_stats(&heap);
         size_t available = heap.total - heap.used;
 
-        if (jpeg_cost + surf_size + 64 * 1024 <= available) {
+        if (total_cost <= available) {
             fits = true;
             break;
         }

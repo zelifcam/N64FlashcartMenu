@@ -24,6 +24,8 @@
 #define QUEUE_TEXT_WIDTH         (280)
 #define TICKER_SCROLL_SPEED     (0.5f)
 #define COVER_SCAN_MAX_ATTEMPTS (20)
+#define COVER_ART_BUDGET_MAX    (400)
+#define COVER_ART_BUDGET_MIN    (16)
 
 typedef enum {
     PLAYBACK_NORMAL,
@@ -223,8 +225,8 @@ static int cover_art_budget_size (void) {
     /* Only clamp upward if heap can actually support the surface */
     size_t min_surface = (size_t)COVER_ART_MAX_SIZE * COVER_ART_MAX_SIZE * 2;
     if (dim < COVER_ART_MAX_SIZE && budget > min_surface) dim = COVER_ART_MAX_SIZE;
-    if (dim > 400) dim = 400;
-    if (dim < 16) dim = 16;
+    if (dim > COVER_ART_BUDGET_MAX) dim = COVER_ART_BUDGET_MAX;
+    if (dim < COVER_ART_BUDGET_MIN) dim = COVER_ART_BUDGET_MIN;
     return dim;
 }
 
@@ -505,11 +507,11 @@ static void sanitize_rdpq_text (char *dst, const char *src, size_t dst_size) {
 
 static char *convert_error_message (mp3player_err_t err) {
     switch (err) {
-        case MP3PLAYER_ERR_OUT_OF_MEM: return "MP3 player failed due to insufficient memory";
-        case MP3PLAYER_ERR_IO: return "I/O error during MP3 playback";
-        case MP3PLAYER_ERR_NO_FILE: return "No MP3 file is loaded";
-        case MP3PLAYER_ERR_INVALID_FILE: return "Invalid MP3 file";
-        default: return "Unknown MP3 player error";
+        case MP3PLAYER_ERR_OUT_OF_MEM: return "Audio player failed due to insufficient memory";
+        case MP3PLAYER_ERR_IO: return "I/O error during audio playback";
+        case MP3PLAYER_ERR_NO_FILE: return "No audio file is loaded";
+        case MP3PLAYER_ERR_INVALID_FILE: return "Invalid audio file";
+        default: return "Unknown audio player error";
     }
 }
 
@@ -529,10 +531,10 @@ static void build_shuffle_list (menu_t *menu) {
     int count = menu->browser.entries;
 
     /* Count music files first */
-    int music_count = 0;
+    int n_music = 0;
     for (int i = 0; i < count; i++) {
         if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
-            music_count++;
+            n_music++;
         }
     }
 
@@ -542,9 +544,9 @@ static void build_shuffle_list (menu_t *menu) {
     shuffle_count = 0;
     shuffle_pos = 0;
 
-    if (music_count == 0) return;
+    if (n_music == 0) return;
 
-    shuffle_list = malloc(music_count * sizeof(int));
+    shuffle_list = malloc(n_music * sizeof(int));
     if (!shuffle_list) return;
 
     /* Collect indices */
@@ -1033,23 +1035,18 @@ static void draw (menu_t *menu, surface_t *d) {
         });
         rdpq_mode_pop();
     } else if (cover_art_expected && art_size > 0 && cover_first_load) {
-        /* Art arrived, switch from placeholder to image */
-        if (cover_image) {
-            cover_first_load = false;
-        } else {
-            /* "Loading..." text centered in art area */
-            const char *loading_text = "Loading...";
-            rdpq_text_printn(
-                &(rdpq_textparms_t) {
-                    .style_id = STL_GRAY,
-                    .width = art_size,
-                    .align = ALIGN_CENTER,
-                },
-                FNT_DEFAULT,
-                art_x, art_y + art_size / 2,
-                loading_text, strlen(loading_text)
-            );
-        }
+        /* "Loading..." text centered in art area */
+        const char *loading_text = "Loading...";
+        rdpq_text_printn(
+            &(rdpq_textparms_t) {
+                .style_id = STL_GRAY,
+                .width = art_size,
+                .align = ALIGN_CENTER,
+            },
+            FNT_DEFAULT,
+            art_x, art_y + art_size / 2,
+            loading_text, strlen(loading_text)
+        );
     }
 
     /* Render queue list */
@@ -1205,7 +1202,8 @@ static void draw_loading_screen (surface_t *d) {
     ui_components_layout_draw();
 
     int idx = loading_step;
-    if (idx > 6) idx = 6;
+    int max_idx = (int)(sizeof(loading_progress) / sizeof(loading_progress[0])) - 1;
+    if (idx > max_idx) idx = max_idx;
     ui_components_loader_draw(loading_progress[idx], "Loading...");
 
     rdpq_detach_show();
