@@ -8,6 +8,8 @@
  * frames and ID3v2 unsynchronization.
  */
 
+#include "utils/utf.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -20,85 +22,6 @@
 #define COVER_ART_TEMP_PATH_PNG "sd:/menu/cache/cover_tmp.png"
 #define COVER_ART_TEMP_PATH_JPG "sd:/menu/cache/cover_tmp.jpg"
 #define COVER_ART_CACHE_DIR     "sd:/menu/cache"
-
-
-/* --- UTF-16 to UTF-8 conversion --- */
-
-/**
- * @brief Convert a UTF-16 buffer to UTF-8.
- *
- * Handles BOM detection, surrogate pairs, and both big/little endian.
- * Non-representable characters are skipped rather than replaced, so
- * CJK and other scripts come through as valid UTF-8 when the display
- * font supports them.
- *
- * @param src       UTF-16 input bytes.
- * @param src_len   Number of input bytes (not code units).
- * @param dst       Output UTF-8 buffer.
- * @param dst_size  Size of output buffer.
- * @param big_endian Default byte order if no BOM is present.
- */
-static void utf16_to_utf8(const uint8_t *src, size_t src_len,
-                          char *dst, size_t dst_size, bool big_endian) {
-    size_t out = 0;
-
-    /* Detect and consume BOM */
-    if (src_len >= 2) {
-        if (src[0] == 0xFF && src[1] == 0xFE) {
-            big_endian = false; src += 2; src_len -= 2;
-        } else if (src[0] == 0xFE && src[1] == 0xFF) {
-            big_endian = true;  src += 2; src_len -= 2;
-        }
-    }
-
-    for (size_t i = 0; i + 1 < src_len; i += 2) {
-        uint16_t code_unit = big_endian
-            ? ((uint16_t)src[i] << 8) | src[i + 1]
-            : ((uint16_t)src[i + 1] << 8) | src[i];
-
-        if (code_unit == 0) break;
-
-        uint32_t codepoint;
-
-        /* Handle surrogate pairs for characters above U+FFFF */
-        if (code_unit >= 0xD800 && code_unit <= 0xDBFF) {
-            if (i + 3 >= src_len) break;
-            uint16_t low = big_endian
-                ? ((uint16_t)src[i + 2] << 8) | src[i + 3]
-                : ((uint16_t)src[i + 3] << 8) | src[i + 2];
-            if (low < 0xDC00 || low > 0xDFFF) continue;
-            codepoint = 0x10000 + ((uint32_t)(code_unit - 0xD800) << 10) + (low - 0xDC00);
-            i += 2;
-        } else if (code_unit >= 0xDC00 && code_unit <= 0xDFFF) {
-            continue; /* stray low surrogate */
-        } else {
-            codepoint = code_unit;
-        }
-
-        /* Encode as UTF-8 */
-        if (codepoint < 0x80) {
-            if (out + 1 >= dst_size) break;
-            dst[out++] = (char)codepoint;
-        } else if (codepoint < 0x800) {
-            if (out + 2 >= dst_size) break;
-            dst[out++] = (char)(0xC0 | (codepoint >> 6));
-            dst[out++] = (char)(0x80 | (codepoint & 0x3F));
-        } else if (codepoint < 0x10000) {
-            if (out + 3 >= dst_size) break;
-            dst[out++] = (char)(0xE0 | (codepoint >> 12));
-            dst[out++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-            dst[out++] = (char)(0x80 | (codepoint & 0x3F));
-        } else {
-            if (out + 4 >= dst_size) break;
-            dst[out++] = (char)(0xF0 | (codepoint >> 18));
-            dst[out++] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
-            dst[out++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-            dst[out++] = (char)(0x80 | (codepoint & 0x3F));
-        }
-    }
-
-    dst[out] = '\0';
-}
 
 
 /* --- String helpers --- */

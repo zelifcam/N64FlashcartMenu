@@ -1,0 +1,11 @@
+#ifndef UTF_H__
+#define UTF_H__
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+void utf16_to_utf8(const uint8_t *src, size_t src_len,
+                   char *dst, size_t dst_size, bool big_endian);
+
+#endif // UTF_H__

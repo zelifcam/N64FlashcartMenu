@@ -32,7 +32,6 @@ static png_decoder_t *decoder;
  */
 static void png_decoder_deinit (bool free_image) {
     if (decoder != NULL) {
-
         fclose(decoder->f);
         if (decoder->ctx != NULL) {
             spng_ctx_free(decoder->ctx);

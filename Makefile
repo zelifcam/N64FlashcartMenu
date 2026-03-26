@@ -116,7 +116,8 @@ SRCS = \
 	menu/views/cpak_dump_info.c \
 	menu/views/cpak_note_dump_info.c \
 	utils/cpakfs_utils.c \
-	utils/fs.c
+	utils/fs.c \
+	utils/utf.c
 
 FONTS = \
 	Firple-Bold.ttf

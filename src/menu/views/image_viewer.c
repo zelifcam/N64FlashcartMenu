@@ -181,15 +181,6 @@ void view_image_viewer_init (menu_t *menu) {
 void view_image_viewer_display (menu_t *menu, surface_t *display) {
     process(menu);
 
-    /* Poll the active decoder */
-    if (image_loading) {
-        if (is_jpeg) {
-            jpeg_decoder_poll();
-        } else {
-            png_decoder_poll();
-        }
-    }
-
     draw(menu, display);
 
     if (menu->next_mode != MENU_MODE_IMAGE_VIEWER) {

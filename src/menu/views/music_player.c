@@ -777,12 +777,6 @@ static void process (menu_t *menu) {
 }
 
 static void draw (menu_t *menu, surface_t *d) {
-    if (cover_state == COVER_LOADING_JPEG) {
-        jpeg_decoder_poll();
-    } else if (cover_state == COVER_LOADING_PNG) {
-        png_decoder_poll();
-    }
-
     rdpq_attach(d, NULL);
 
     ui_components_background_draw();
@@ -1291,9 +1285,6 @@ void view_music_player_init (menu_t *menu) {
 void view_music_player_display (menu_t *menu, surface_t *display) {
     if (player_state == PLAYER_LOADING) {
         /* Poll cover art decoder if active */
-        if (cover_state == COVER_LOADING_JPEG) jpeg_decoder_poll();
-        else if (cover_state == COVER_LOADING_PNG) png_decoder_poll();
-
         bool done = loading_tick(menu);
         draw_loading_screen(display);
 
