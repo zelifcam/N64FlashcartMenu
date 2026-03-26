@@ -33,13 +33,6 @@
 #define FLAC_READ_FRAMES       (1152)  /* samples per wave_read iteration */
 #define FLAC_IO_BUFFER_SIZE     (8 * 1024)
 
-/* Guard debug output behind the same flag used in music_player.c.
- * Compiles to nothing in release builds. */
-#ifdef MP3_PLAYER_DEBUG
-#define player_debugf(...) debugf(__VA_ARGS__)
-#else
-#define player_debugf(...) ((void)0)
-#endif
 
 typedef enum {
     AUDIO_FORMAT_MP3,
@@ -335,8 +328,6 @@ static mp3player_err_t track_load_flac (audio_track_t *t, int id3_flags) {
     /* Verify FLAC magic bytes */
     uint8_t magic[4];
     if (fread(magic, 1, 4, t->f) != 4 || memcmp(magic, "fLaC", 4) != 0) {
-        player_debugf("[FLAC] not a FLAC file (magic: %02x %02x %02x %02x)\n",
-               magic[0], magic[1], magic[2], magic[3]);
         fclose(t->f);
         t->f = NULL;
         return MP3PLAYER_ERR_INVALID_FILE;
@@ -355,12 +346,10 @@ static mp3player_err_t track_load_flac (audio_track_t *t, int id3_flags) {
     t->flac_io->meta = &t->metadata;
     t->flac_io->flags = id3_flags;
 
-    player_debugf("[FLAC] opening with dr_flac (file_size=%lu)\n", (unsigned long)t->file_size);
     t->flac = drflac_open_with_metadata(drflac_read_cb, drflac_seek_cb,
                                          drflac_tell_cb, flac_metadata_callback,
                                          t->flac_io, NULL);
     if (!t->flac) {
-        player_debugf("[FLAC] drflac_open failed\n");
         free(t->flac_io);
         t->flac_io = NULL;
         fclose(t->f);
@@ -368,13 +357,8 @@ static mp3player_err_t track_load_flac (audio_track_t *t, int id3_flags) {
         return MP3PLAYER_ERR_INVALID_FILE;
     }
 
-    player_debugf("[FLAC] opened: %d ch, %d Hz, %llu frames\n",
-           t->flac->channels, t->flac->sampleRate,
-           (unsigned long long)t->flac->totalPCMFrameCount);
-
     /* Reject unsupported channel counts */
     if (t->flac->channels > 2) {
-        player_debugf("[FLAC] rejected: channels=%d (max 2)\n", t->flac->channels);
         drflac_close(t->flac);
         t->flac = NULL;
         free(t->flac_io);
@@ -402,9 +386,6 @@ static mp3player_err_t track_load_flac (audio_track_t *t, int id3_flags) {
         t->duration = (float)t->total_pcm_frames / (float)t->native_rate;
         t->bitrate = (t->file_size * 8.0f) / t->duration;
     }
-
-    player_debugf("[FLAC] playback: %dHz (native %dHz, downsample %dx), duration %.1fs\n",
-           t->samplerate, t->native_rate, t->downsample, t->duration);
 
     t->metadata.has_metadata = (t->metadata.title[0] || t->metadata.artist[0] || t->metadata.album[0]);
 
