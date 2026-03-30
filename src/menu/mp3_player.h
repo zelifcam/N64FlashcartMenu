@@ -188,4 +188,15 @@ float mp3player_get_progress(void);
  */
 const id3_metadata_t *mp3player_get_metadata(void);
 
+/**
+ * @brief Take ownership of the embedded cover art buffer.
+ *
+ * Returns the heap-allocated art data and NULLs the internal pointer
+ * so track_unload won't free it. Caller takes ownership.
+ *
+ * @param size_out  Receives the buffer size (may be NULL).
+ * @return Heap buffer, or NULL if no art. Caller must free.
+ */
+uint8_t *mp3player_take_cover_art(size_t *size_out);
+
 #endif /* MP3_PLAYER_H__ */

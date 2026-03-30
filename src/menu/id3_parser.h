@@ -25,15 +25,13 @@ typedef struct {
     int track_number;
     bool has_metadata;
     bool has_cover_art;
-    size_t cover_art_size;          /**< Size of extracted APIC data (for same-album detection) */
-    char cover_art_path[256];
+    bool cover_art_is_png;          /**< true = PNG, false = JPEG */
+    size_t cover_art_size;          /**< Size of embedded art data */
+    uint8_t *cover_art_data;        /**< Heap-allocated copy of art bytes (caller frees) */
 } id3_metadata_t;
 
-/** @brief Remove any cover art temp files from the SD card. */
-void id3_free_cover_art(void);
-
 /** @brief Flags for id3_parse to control what gets extracted. */
-#define ID3_FLAG_EXTRACT_ART    (1 << 0)  /**< Extract APIC cover art to temp file */
+#define ID3_FLAG_EXTRACT_ART    (1 << 0)  /**< Extract embedded cover art to memory */
 
 /**
  * @brief Parse ID3 metadata from an open MP3 file.

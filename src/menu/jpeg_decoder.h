@@ -42,6 +42,24 @@ typedef void (jpeg_callback_t)(jpeg_err_t err, surface_t *decoded_image, void *c
 jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
                                jpeg_callback_t *callback, void *callback_data);
 
+/**
+ * @brief Start decoding JPEG from an in-memory buffer.
+ *
+ * Same as jpeg_decoder_start but reads from a heap buffer instead of a file.
+ * The decoder takes ownership of @p buf and frees it when done.
+ *
+ * @param buf            Heap-allocated JPEG data (ownership transferred).
+ * @param buf_size       Size of the buffer in bytes.
+ * @param max_width      Maximum output width in pixels.
+ * @param max_height     Maximum output height in pixels.
+ * @param callback       Called when decoding completes.
+ * @param callback_data  Passed through to callback.
+ * @return JPEG_OK if decoding started.
+ */
+jpeg_err_t jpeg_decoder_start_mem (void *buf, size_t buf_size,
+                                   int max_width, int max_height,
+                                   jpeg_callback_t *callback, void *callback_data);
+
 /** @brief Abort and free all resources if a decode is in progress. */
 void jpeg_decoder_abort (void);
 

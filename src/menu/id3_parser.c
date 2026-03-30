@@ -12,16 +12,12 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include <libdragon.h>
 
 #include "id3_parser.h"
 
 #define ID3V2_MAX_TAG_SIZE      (1024 * 1024)
-#define COVER_ART_TEMP_PATH_PNG "sd:/menu/cache/cover_tmp.png"
-#define COVER_ART_TEMP_PATH_JPG "sd:/menu/cache/cover_tmp.jpg"
-#define COVER_ART_CACHE_DIR     "sd:/menu/cache"
 
 
 /* --- String helpers --- */
@@ -177,12 +173,7 @@ static bool is_apic_frame(const uint8_t *id, int id_len) {
     return false;
 }
 
-/** Ensure the cache directory exists, creating it if needed. */
-static void ensure_cache_dir(void) {
-    mkdir(COVER_ART_CACHE_DIR, 0777);
-}
-
-/** Extract an APIC frame's image data to a temp file on the SD card.
+/** Extract an APIC frame's image data into a heap buffer.
  *  Returns true on success. */
 static bool extract_apic(const uint8_t *data, size_t data_len, int id_len, id3_metadata_t *meta) {
     if (data_len < 4) return false;
@@ -245,23 +236,20 @@ static bool extract_apic(const uint8_t *data, size_t data_len, int id_len, id3_m
 
     if (remaining < 8) return false;
 
-    ensure_cache_dir();
-    const char *tmp_path = is_png ? COVER_ART_TEMP_PATH_PNG : COVER_ART_TEMP_PATH_JPG;
-    FILE *tmp = fopen(tmp_path, "wb");
-    if (!tmp) return false;
+    /* Only allocate if we have enough free memory (keep 20% headroom) */
+    heap_stats_t heap;
+    sys_get_heap_stats(&heap);
+    size_t free_mem = (size_t)(heap.total - heap.used);
+    if (remaining > (size_t)(free_mem * 0.8f)) return false;
 
-    size_t written = fwrite(p, 1, remaining, tmp);
-    fclose(tmp);
-
-    if (written != remaining) {
-        remove(tmp_path);
-        return false;
-    }
+    uint8_t *buf = malloc(remaining);
+    if (!buf) return false;
+    memcpy(buf, p, remaining);
 
     meta->has_cover_art = true;
+    meta->cover_art_is_png = is_png;
     meta->cover_art_size = remaining;
-    strncpy(meta->cover_art_path, tmp_path, sizeof(meta->cover_art_path) - 1);
-    meta->cover_art_path[sizeof(meta->cover_art_path) - 1] = '\0';
+    meta->cover_art_data = buf;
     return true;
 }
 
@@ -386,7 +374,3 @@ void id3_parse(FILE *f, size_t file_size, id3_metadata_t *meta, int flags) {
     fseek(f, saved, SEEK_SET);
 }
 
-void id3_free_cover_art(void) {
-    remove(COVER_ART_TEMP_PATH_PNG);
-    remove(COVER_ART_TEMP_PATH_JPG);
-}

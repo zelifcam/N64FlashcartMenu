@@ -13,6 +13,8 @@
 /** @brief PNG File Information Structure. */
 typedef struct {
     FILE *f; /**< File pointer */
+    uint8_t *mem_buf; /**< Heap buffer for in-memory decode (freed on deinit) */
+    size_t mem_buf_size; /**< Size of mem_buf */
     spng_ctx *ctx; /**< SPNG context */
     struct spng_ihdr ihdr; /**< SPNG image header */
     surface_t *image; /**< Image surface */
@@ -32,7 +34,8 @@ static png_decoder_t *decoder;
  */
 static void png_decoder_deinit (bool free_image) {
     if (decoder != NULL) {
-        fclose(decoder->f);
+        if (decoder->f) fclose(decoder->f);
+        free(decoder->mem_buf);
         if (decoder->ctx != NULL) {
             spng_ctx_free(decoder->ctx);
         }
@@ -48,38 +51,9 @@ static void png_decoder_deinit (bool free_image) {
     }
 }
 
-/**
- * @brief Start decoding a PNG file.
- * 
- * @param path Path to the PNG file.
- * @param max_width Maximum width of the image.
- * @param max_height Maximum height of the image.
- * @param callback Callback function to be called upon completion.
- * @param callback_data Data to be passed to the callback function.
- * @return png_err_t Error code.
- */
-png_err_t png_decoder_start (char *path, int max_width, int max_height, png_callback_t *callback, void *callback_data) {
-    if (decoder != NULL) {
-        return PNG_ERR_BUSY;
-    }
-
-    decoder = calloc(1, sizeof(png_decoder_t));
-    if (decoder == NULL) {
-        return PNG_ERR_OUT_OF_MEM;
-    }
-
-    if ((decoder->f = fopen(path, "rb")) == NULL) {
-        png_decoder_deinit(false);
-        return PNG_ERR_NO_FILE;
-    }
-
-    setbuf(decoder->f, NULL);
-
-    if ((decoder->ctx = spng_ctx_new(SPNG_CTX_IGNORE_ADLER32)) == NULL) {
-        png_decoder_deinit(false);
-        return PNG_ERR_OUT_OF_MEM;
-    }
-
+/** Shared setup after the PNG source has been configured.
+ *  Parses the header, picks output dimensions, allocates the surface. */
+static png_err_t png_decoder_setup (int max_width, int max_height) {
     if (spng_set_crc_action(decoder->ctx, SPNG_CRC_USE, SPNG_CRC_USE) != SPNG_OK) {
         png_decoder_deinit(false);
         return PNG_ERR_INT;
@@ -92,9 +66,16 @@ png_err_t png_decoder_start (char *path, int max_width, int max_height, png_call
         return PNG_ERR_INT;
     }
 
-    if (spng_set_png_file(decoder->ctx, decoder->f) != SPNG_OK) {
-        png_decoder_deinit(false);
-        return PNG_ERR_INT;
+    if (decoder->f) {
+        if (spng_set_png_file(decoder->ctx, decoder->f) != SPNG_OK) {
+            png_decoder_deinit(false);
+            return PNG_ERR_INT;
+        }
+    } else {
+        if (spng_set_png_buffer(decoder->ctx, decoder->mem_buf, decoder->mem_buf_size) != SPNG_OK) {
+            png_decoder_deinit(false);
+            return PNG_ERR_INT;
+        }
     }
 
     size_t image_size;
@@ -162,11 +143,50 @@ png_err_t png_decoder_start (char *path, int max_width, int max_height, png_call
     }
 
     decoder->decoded_rows = 0;
+    return PNG_OK;
+}
+
+png_err_t png_decoder_start (char *path, int max_width, int max_height, png_callback_t *callback, void *callback_data) {
+    if (decoder != NULL) return PNG_ERR_BUSY;
+
+    decoder = calloc(1, sizeof(png_decoder_t));
+    if (decoder == NULL) return PNG_ERR_OUT_OF_MEM;
 
     decoder->callback = callback;
     decoder->callback_data = callback_data;
 
-    return PNG_OK;
+    if ((decoder->f = fopen(path, "rb")) == NULL) {
+        png_decoder_deinit(false);
+        return PNG_ERR_NO_FILE;
+    }
+    setbuf(decoder->f, NULL);
+
+    if ((decoder->ctx = spng_ctx_new(SPNG_CTX_IGNORE_ADLER32)) == NULL) {
+        png_decoder_deinit(false);
+        return PNG_ERR_OUT_OF_MEM;
+    }
+
+    return png_decoder_setup(max_width, max_height);
+}
+
+png_err_t png_decoder_start_mem (void *buf, size_t buf_size, int max_width, int max_height, png_callback_t *callback, void *callback_data) {
+    if (decoder != NULL) return PNG_ERR_BUSY;
+
+    decoder = calloc(1, sizeof(png_decoder_t));
+    if (decoder == NULL) return PNG_ERR_OUT_OF_MEM;
+
+    decoder->callback = callback;
+    decoder->callback_data = callback_data;
+
+    decoder->mem_buf = buf;
+    decoder->mem_buf_size = buf_size;
+
+    if ((decoder->ctx = spng_ctx_new(SPNG_CTX_IGNORE_ADLER32)) == NULL) {
+        png_decoder_deinit(false);
+        return PNG_ERR_OUT_OF_MEM;
+    }
+
+    return png_decoder_setup(max_width, max_height);
 }
 
 /**

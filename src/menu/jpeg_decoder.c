@@ -27,6 +27,8 @@ typedef struct {
     struct jpeg_decompress_struct cinfo;
     jpeg_error_mgr_ex_t jerr;
     FILE            *f;
+    uint8_t         *mem_buf;       /* heap buffer for in-memory decode (freed on deinit) */
+    size_t           mem_buf_size;
     JSAMPROW         row_buf;
     surface_t       *image;
     int              src_w, src_h, dst_w, dst_h, comps;
@@ -47,13 +49,13 @@ static void jpeg_error_exit_ex (j_common_ptr cinfo) {
 static void jpeg_decoder_deinit (bool free_image) {
     if (!decoder) return;
 
-
     free(decoder->row_buf);
     if (decoder->started) {
         jpeg_abort_decompress(&decoder->cinfo);
         jpeg_destroy_decompress(&decoder->cinfo);
     }
     if (decoder->f) fclose(decoder->f);
+    free(decoder->mem_buf);
     if (free_image && decoder->image) {
         surface_free(decoder->image);
         free(decoder->image);
@@ -63,28 +65,9 @@ static void jpeg_decoder_deinit (bool free_image) {
 }
 
 
-jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
-                               jpeg_callback_t *callback, void *callback_data) {
-    if (decoder) {
-        return JPEG_ERR_BUSY;
-    }
-
-    decoder = calloc(1, sizeof(jpeg_decoder_t));
-    if (!decoder) {
-        return JPEG_ERR_OUT_OF_MEM;
-    }
-    decoder->callback      = callback;
-    decoder->callback_data = callback_data;
-
-    decoder->f = fopen(path, "rb");
-    if (!decoder->f) {
-        jpeg_decoder_deinit(false);
-        return JPEG_ERR_NO_FILE;
-    }
-
-    decoder->cinfo.err = jpeg_std_error(&decoder->jerr.pub);
-    decoder->jerr.pub.error_exit = jpeg_error_exit_ex;
-
+/** Shared setup after the JPEG source has been configured.
+ *  Reads the header, picks a scale factor, allocates the output surface. */
+static jpeg_err_t jpeg_decoder_setup (int max_width, int max_height) {
     if (setjmp(decoder->jerr.setjmp_buf)) {
         jpeg_decoder_deinit(false);
         return JPEG_ERR_BAD_FILE;
@@ -92,13 +75,15 @@ jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
 
     jpeg_create_decompress(&decoder->cinfo);
     decoder->started = true;
-    jpeg_stdio_src(&decoder->cinfo, decoder->f);
+
+    if (decoder->f) {
+        jpeg_stdio_src(&decoder->cinfo, decoder->f);
+    } else {
+        jpeg_mem_src(&decoder->cinfo, decoder->mem_buf, decoder->mem_buf_size);
+    }
+
     jpeg_read_header(&decoder->cinfo, TRUE);
 
-    /* Progressive JPEGs require libjpeg to buffer all DCT coefficients
-     * before outputting any scanlines. Estimate the coefficient buffer size
-     * (2x to account for libjpeg internal overhead) and reject if it won't
-     * fit, before jpeg_start_decompress does the huge allocation. */
     /* Pick the best DCT scale that fits within max dimensions AND
      * available heap. Try the largest scale first, fall back to smaller
      * until the output surface + row buffer + headroom fits in memory.
@@ -204,6 +189,46 @@ jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
 
     decoder->scan_y = 0;
     return JPEG_OK;
+}
+
+jpeg_err_t jpeg_decoder_start (char *path, int max_width, int max_height,
+                               jpeg_callback_t *callback, void *callback_data) {
+    if (decoder) return JPEG_ERR_BUSY;
+
+    decoder = calloc(1, sizeof(jpeg_decoder_t));
+    if (!decoder) return JPEG_ERR_OUT_OF_MEM;
+    decoder->callback      = callback;
+    decoder->callback_data = callback_data;
+
+    decoder->f = fopen(path, "rb");
+    if (!decoder->f) {
+        jpeg_decoder_deinit(false);
+        return JPEG_ERR_NO_FILE;
+    }
+
+    decoder->cinfo.err = jpeg_std_error(&decoder->jerr.pub);
+    decoder->jerr.pub.error_exit = jpeg_error_exit_ex;
+
+    return jpeg_decoder_setup(max_width, max_height);
+}
+
+jpeg_err_t jpeg_decoder_start_mem (void *buf, size_t buf_size,
+                                   int max_width, int max_height,
+                                   jpeg_callback_t *callback, void *callback_data) {
+    if (decoder) return JPEG_ERR_BUSY;
+
+    decoder = calloc(1, sizeof(jpeg_decoder_t));
+    if (!decoder) return JPEG_ERR_OUT_OF_MEM;
+    decoder->callback      = callback;
+    decoder->callback_data = callback_data;
+
+    decoder->mem_buf      = buf;
+    decoder->mem_buf_size = buf_size;
+
+    decoder->cinfo.err = jpeg_std_error(&decoder->jerr.pub);
+    decoder->jerr.pub.error_exit = jpeg_error_exit_ex;
+
+    return jpeg_decoder_setup(max_width, max_height);
 }
 
 void jpeg_decoder_poll (void) {

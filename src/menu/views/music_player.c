@@ -270,20 +270,6 @@ static void cover_art_png_cb (png_err_t err, surface_t *image, void *data) {
         cover_image = image;
         cover_cache_blit_params();
     } else {
-        /* If a .png temp file failed, the APIC data might actually be JPEG.
-         * Try decoding as JPEG before giving up. */
-        const id3_metadata_t *meta = mp3player_get_metadata();
-        if (meta->has_cover_art && meta->cover_art_path[0]) {
-            int max_size = cover_art_budget_size();
-            cover_state = COVER_LOADING_JPEG;
-            jpeg_err_t jerr = jpeg_decoder_start((char *)meta->cover_art_path, max_size, max_size,
-                                                  cover_art_cb, NULL);
-            if (jerr == JPEG_OK) {
-                return;
-            }
-            cover_state = COVER_IDLE;
-        }
-
         try_next_cover_source();
     }
 }
@@ -391,9 +377,9 @@ static void find_cover_art_source (path_t *directory, char *out_path, size_t out
 
     const id3_metadata_t *meta = mp3player_get_metadata();
 
-    if (meta->has_cover_art && meta->cover_art_path[0]) {
-        strncpy(out_path, meta->cover_art_path, out_size - 1);
-        out_path[out_size - 1] = '\0';
+    if (meta->has_cover_art && meta->cover_art_data) {
+        snprintf(out_path, out_size, "embedded:%lu",
+                 (unsigned long)meta->cover_art_size);
         return;
     }
 
@@ -436,14 +422,9 @@ static void load_cover_art (path_t *directory) {
     char new_source[256];
     find_cover_art_source(directory, new_source, sizeof(new_source));
 
-    /* For embedded art, use the APIC data size as the cache key.
-     * Same album tracks typically have identical embedded art (same size).
-     * Different albums will have different sizes, triggering a reload. */
-    const id3_metadata_t *meta_src = mp3player_get_metadata();
-    if (meta_src->has_cover_art && meta_src->cover_art_path[0]) {
-        snprintf(new_source, sizeof(new_source), "embedded:%lu",
-                 (unsigned long)meta_src->cover_art_size);
-    }
+    /* For embedded art, find_cover_art_source already set new_source
+     * to "embedded:<size>" — same album tracks typically have identical
+     * embedded art (same size), different albums trigger a reload. */
 
     /* If same source as current and we already have an image, skip reload */
     if (cover_image && new_source[0] && strcmp(new_source, cover_art_source) == 0) {
@@ -478,10 +459,28 @@ static void load_cover_art (path_t *directory) {
 
     const id3_metadata_t *meta = mp3player_get_metadata();
 
-    /* Try embedded cover art first */
-    if (meta->has_cover_art && meta->cover_art_path[0]) {
+    /* Try embedded cover art first (decode directly from memory buffer).
+     * The decoder takes ownership of the buffer and frees it when done. */
+    if (meta->has_cover_art && meta->cover_art_data) {
         int max_size = cover_art_budget_size();
-        if (try_cover_path(meta->cover_art_path, max_size)) return;
+        size_t buf_size;
+        uint8_t *buf = mp3player_take_cover_art(&buf_size);
+
+        if (buf) {
+            bool started = false;
+            if (meta->cover_art_is_png) {
+                cover_state = COVER_LOADING_PNG;
+                started = (png_decoder_start_mem(buf, buf_size, max_size, max_size,
+                                                 cover_art_png_cb, NULL) == PNG_OK);
+            } else {
+                cover_state = COVER_LOADING_JPEG;
+                started = (jpeg_decoder_start_mem(buf, buf_size, max_size, max_size,
+                                                  cover_art_cb, NULL) == JPEG_OK);
+            }
+
+            if (started) return;
+            cover_state = COVER_IDLE;
+        }
     }
 
     /* Fall back to directory scan */

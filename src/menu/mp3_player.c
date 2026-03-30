@@ -164,30 +164,23 @@ static void flac_metadata_callback (void *userdata, drflac_metadata *metadata) {
         if (pic_data && pic_size > 0 &&
             (pic_type == DRFLAC_PICTURE_TYPE_COVER_FRONT || pic_type == DRFLAC_PICTURE_TYPE_OTHER)) {
 
-            /* Determine extension from MIME type */
-            const char *ext = "jpg";
-            if (metadata->data.picture.mime &&
-                strstr(metadata->data.picture.mime, "png")) {
-                ext = "png";
-            }
+            bool is_png = metadata->data.picture.mime &&
+                          strstr(metadata->data.picture.mime, "png");
 
-            /* Write to temp file, same path convention as ID3 APIC */
-            char tmp_path[256];
-            snprintf(tmp_path, sizeof(tmp_path), "sd:/menu/cache/cover_tmp.%s", ext);
-            mkdir("sd:/menu/cache", 0755);
+            /* Only allocate if we have enough free memory (keep 20% headroom) */
+            heap_stats_t heap;
+            sys_get_heap_stats(&heap);
+            size_t free_mem = (size_t)(heap.total - heap.used);
+            if (pic_size > (size_t)(free_mem * 0.8f)) return;
 
-            FILE *out = fopen(tmp_path, "wb");
-            if (out) {
-                if (fwrite(pic_data, 1, pic_size, out) != pic_size) {
-                    fclose(out);
-                    return;
-                }
-                fclose(out);
-                strncpy(meta->cover_art_path, tmp_path, sizeof(meta->cover_art_path) - 1);
-                meta->cover_art_path[sizeof(meta->cover_art_path) - 1] = '\0';
-                meta->has_cover_art = true;
-                meta->cover_art_size = pic_size;
-            }
+            uint8_t *buf = malloc(pic_size);
+            if (!buf) return;
+            memcpy(buf, pic_data, pic_size);
+
+            meta->has_cover_art = true;
+            meta->cover_art_is_png = is_png;
+            meta->cover_art_size = pic_size;
+            meta->cover_art_data = buf;
         }
     }
 }
@@ -264,6 +257,8 @@ static void track_unload (audio_track_t *t) {
     }
     free(t->filebuf);
     t->filebuf = NULL;
+    free(t->metadata.cover_art_data);
+    t->metadata.cover_art_data = NULL;
 }
 
 static mp3player_err_t track_load_mp3 (audio_track_t *t, int id3_flags) {
@@ -579,7 +574,6 @@ mp3player_err_t mp3player_init (void) {
 void mp3player_deinit (void) {
     if (!p) return;
     mp3player_unload();
-    id3_free_cover_art();
     free(p);
     p = NULL;
 }
@@ -780,5 +774,16 @@ const id3_metadata_t *mp3player_get_metadata (void) {
     static const id3_metadata_t empty = {0};
     if (!p || !p->current.loaded) return &empty;
     return &p->current.metadata;
+}
+
+uint8_t *mp3player_take_cover_art (size_t *size_out) {
+    if (!p || !p->current.loaded || !p->current.metadata.cover_art_data) {
+        if (size_out) *size_out = 0;
+        return NULL;
+    }
+    uint8_t *buf = p->current.metadata.cover_art_data;
+    if (size_out) *size_out = p->current.metadata.cover_art_size;
+    p->current.metadata.cover_art_data = NULL;
+    return buf;
 }
 
