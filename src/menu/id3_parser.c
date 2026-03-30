@@ -129,8 +129,10 @@ static void decode_text_frame(const uint8_t *data, size_t data_len,
 
     if (encoding == 0x01 || encoding == 0x02) {
         utf16_to_utf8(text, text_len, dst, dst_size, encoding == 0x02);
+    } else if (encoding == 0x00) {
+        latin1_to_utf8(text, text_len, dst, dst_size);
     } else {
-        /* ISO-8859-1 (0x00) or UTF-8 (0x03), both usable as-is */
+        /* UTF-8 (0x03), usable as-is */
         trim_copy(dst, text, text_len, dst_size);
     }
 }

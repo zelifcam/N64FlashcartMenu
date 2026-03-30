@@ -1,6 +1,6 @@
 /**
  * @file utf.c
- * @brief UTF-16 to UTF-8 conversion
+ * @brief Text encoding conversions to UTF-8
  * @ingroup utils
  *
  * Handles BOM detection, surrogate pairs, and both big/little endian.
@@ -69,6 +69,29 @@ void utf16_to_utf8(const uint8_t *src, size_t src_len,
             dst[out++] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
             dst[out++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
             dst[out++] = (char)(0x80 | (codepoint & 0x3F));
+        }
+    }
+
+    dst[out] = '\0';
+}
+
+void latin1_to_utf8(const uint8_t *src, size_t src_len,
+                    char *dst, size_t dst_size) {
+    size_t out = 0;
+
+    if (dst_size == 0) return;
+
+    for (size_t i = 0; i < src_len; i++) {
+        uint8_t ch = src[i];
+        if (ch == 0) break;
+
+        if (ch < 0x80) {
+            if (out + 1 >= dst_size) break;
+            dst[out++] = (char)ch;
+        } else {
+            if (out + 2 >= dst_size) break;
+            dst[out++] = (char)(0xC0 | (ch >> 6));
+            dst[out++] = (char)(0x80 | (ch & 0x3F));
         }
     }
 
