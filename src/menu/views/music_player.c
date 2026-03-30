@@ -1126,7 +1126,7 @@ static bool loading_tick (menu_t *menu) {
             if (err != MP3PLAYER_OK) {
                 menu_show_error(menu, convert_error_message(err));
                 mp3player_deinit();
-                return true;
+                return false;
             }
             loading_step++;
             return false;
@@ -1138,7 +1138,7 @@ static bool loading_tick (menu_t *menu) {
             if (err != MP3PLAYER_OK) {
                 menu_show_error(menu, convert_error_message(err));
                 mp3player_deinit();
-                return true;
+                return false;
             }
             loading_step++;
             return false;
