@@ -188,44 +188,4 @@ float mp3player_get_progress(void);
  */
 const id3_metadata_t *mp3player_get_metadata(void);
 
-/**
- * @brief Preload the next track for seamless playback.
- *
- * Opens and parses the file so it's ready for instant crossover when
- * the current track ends. The mixer never stops.
- *
- * @param path Path to the next audio file.
- * @return mp3player_err_t Error code.
- */
-mp3player_err_t mp3player_preload_next(char *path);
-
-/**
- * @brief Check if the preloaded track matches a given path.
- *
- * @param path Path to check against.
- * @return true if a track is preloaded and its path matches.
- */
-bool mp3player_preload_matches(char *path);
-
-/**
- * @brief Swap the preloaded track into the current slot and start playback.
- *
- * Stops the current track, promotes preloaded to current, and starts
- * the mixer. Much faster than mp3player_load for the next track.
- *
- * @return mp3player_err_t Error code.
- */
-mp3player_err_t mp3player_play_preloaded(void);
-
-/**
- * @brief Check if a seamless track advance occurred.
- *
- * Returns true once after the player internally switched from the
- * current track to the preloaded next track. The caller should update
- * UI state (metadata, cover art, selection) when this returns true.
- *
- * @return true if a track advance happened since last check.
- */
-bool mp3player_did_advance(void);
-
 #endif /* MP3_PLAYER_H__ */

@@ -564,49 +564,6 @@ static void build_shuffle_list (menu_t *menu) {
     }
 }
 
-/** Preload the next track for seamless playback based on current mode. */
-static void preload_next_track (menu_t *menu) {
-    int current = menu->browser.selected;
-    int count = menu->browser.entries;
-    int next_idx = -1;
-
-    if (playback_mode == PLAYBACK_REPEAT_ONE) {
-        next_idx = current;
-    } else if (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) {
-        if (shuffle_list && shuffle_pos + 1 < shuffle_count) {
-            next_idx = shuffle_list[shuffle_pos + 1];
-        } else if (playback_mode == PLAYBACK_PARTY) {
-            /* Will reshuffle when needed, preload first of next cycle isn't practical */
-            return;
-        }
-    } else {
-        /* Normal / Loop: find next music file */
-        for (int i = current + 1; i < count; i++) {
-            if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
-                next_idx = i;
-                break;
-            }
-        }
-        if (next_idx < 0 && playback_mode == PLAYBACK_LOOP) {
-            for (int i = 0; i < current; i++) {
-                if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
-                    next_idx = i;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (next_idx >= 0 && next_idx < count) {
-        entry_t *e = &menu->browser.list[next_idx];
-        if (e->type == ENTRY_TYPE_MUSIC) {
-            path_t *path = path_clone_push(menu->browser.directory, e->name);
-            mp3player_preload_next(path_get(path));
-            path_free(path);
-        }
-    }
-}
-
 /** Try to load and play the track at the given browser index.
  *  Returns true on success. */
 static bool try_play_index (menu_t *menu, int idx) {
@@ -629,7 +586,6 @@ static bool try_play_index (menu_t *menu, int idx) {
     ticker_offset = 0.0f;
 
     load_cover_art(menu->browser.directory);
-    preload_next_track(menu);
     return true;
 }
 
@@ -702,45 +658,7 @@ static void process (menu_t *menu) {
         return;
     }
 
-    /* Handle track crossover: the mixer already switched tracks internally */
-    if (mp3player_did_advance()) {
-        /* Find what track is now playing and update UI state */
-        if (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) {
-            shuffle_pos++;
-            if (shuffle_pos >= shuffle_count && playback_mode == PLAYBACK_PARTY) {
-                build_shuffle_list(menu);
-                shuffle_pos = 0;
-            }
-            if (shuffle_pos < shuffle_count) {
-                int idx = shuffle_list[shuffle_pos];
-                menu->browser.selected = idx;
-                menu->browser.entry = &menu->browser.list[idx];
-            }
-        } else {
-            /* Find next music file after current selection */
-            for (int i = menu->browser.selected + 1; i < menu->browser.entries; i++) {
-                if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
-                    menu->browser.selected = i;
-                    menu->browser.entry = &menu->browser.list[i];
-                    break;
-                }
-            }
-            if (playback_mode == PLAYBACK_LOOP && mp3player_is_finished()) {
-                for (int i = 0; i < menu->browser.entries; i++) {
-                    if (menu->browser.list[i].type == ENTRY_TYPE_MUSIC) {
-                        menu->browser.selected = i;
-                        menu->browser.entry = &menu->browser.list[i];
-                        break;
-                    }
-                }
-            }
-        }
-        load_cover_art(menu->browser.directory);
-        preload_next_track(menu);
-        advance_failed = false;
-    }
-
-    /* Fallback: if track finished without crossover (no preload ready), try manual advance */
+    /* Auto-advance to next track when current finishes */
     if (mp3player_is_finished() && !advance_failed) {
         if (!try_skip_track(menu, 1)) {
             advance_failed = true;
@@ -1182,8 +1100,7 @@ static const float loading_progress[] = {
     0.15f,  /* step 1: mp3player_load */
     0.40f,  /* step 2: build music index */
     0.60f,  /* step 3: sound init */
-    0.75f,  /* step 4: cover art */
-    0.85f,  /* step 5: preload next */
+    0.80f,  /* step 4: cover art */
     0.95f,  /* done, transitions immediately */
 };
 
@@ -1240,17 +1157,6 @@ static bool loading_tick (menu_t *menu) {
         case 4: {
             load_cover_art(menu->browser.directory);
             loading_step++;
-            return false;
-        }
-        case 5: {
-            /* Preload next track (after cover art decode starts).
-             * Must wait until cover art file is no longer being read,
-             * because preload's id3_parse can overwrite the temp file. */
-            bool art_reading = (cover_state == COVER_LOADING_JPEG || cover_state == COVER_LOADING_PNG);
-            if (!art_reading) {
-                preload_next_track(menu);
-                loading_step++;
-            }
             return false;
         }
         default: {

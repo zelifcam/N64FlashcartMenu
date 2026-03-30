@@ -3,9 +3,8 @@
  * @brief Audio player with MP3 and FLAC support
  * @ingroup ui_components
  *
- * Supports preloading the next track so the mixer never stops between
- * tracks. Format is detected by file extension. MP3 uses minimp3,
- * FLAC uses dr_flac. Both share the same track crossover mechanism.
+ * Format is detected by file extension. MP3 uses minimp3,
+ * FLAC uses dr_flac.
  */
 
 #include <stdio.h>
@@ -39,8 +38,7 @@ typedef enum {
     AUDIO_FORMAT_FLAC,
 } audio_format_t;
 
-/** Wrapper for dr_flac I/O callbacks. Each track gets its own so that
- *  current and preloaded tracks don't share file handles. */
+/** Wrapper for dr_flac I/O callbacks. */
 typedef struct {
     FILE *f;
     id3_metadata_t *meta;
@@ -72,7 +70,7 @@ typedef struct {
     mp3dec_frame_info_t info;
 
     /* FLAC-specific */
-    flac_io_t *flac_io;  /* heap-allocated so pointer survives memcpy swap */
+    flac_io_t *flac_io;  /* heap-allocated; drflac stores this pointer internally */
     drflac *flac;
     drflac_uint64 total_pcm_frames;
     drflac_uint64 current_pcm_frame;
@@ -81,14 +79,9 @@ typedef struct {
     char *filebuf;     /* stdio buffer for FLAC, reduces SD card round-trips */
 } audio_track_t;
 
-/** @brief Player state with current + preloaded next track. */
+/** @brief Player state. */
 typedef struct {
     audio_track_t current;
-    audio_track_t next;
-    bool next_ready;
-    volatile bool track_advanced;
-    char next_path[256];  /* path of preloaded track for matching */
-
     waveform_t wave;
 } mp3player_t;
 
@@ -334,8 +327,8 @@ static mp3player_err_t track_load_flac (audio_track_t *t, int id3_flags) {
     }
     fseek(t->f, 0, SEEK_SET);
 
-    /* Heap-allocate the I/O wrapper so the pointer survives memcpy swaps
-     * during track crossover. drflac stores this pointer internally. */
+    /* Heap-allocate the I/O wrapper because drflac stores
+     * this pointer internally. */
     t->flac_io = malloc(sizeof(flac_io_t));
     if (!t->flac_io) {
         fclose(t->f);
@@ -431,9 +424,8 @@ static mp3player_err_t track_load (audio_track_t *t, char *path, int id3_flags) 
 static bool track_is_finished (audio_track_t *t) {
     if (!t->loaded) return false;
     if (t->format == AUDIO_FORMAT_FLAC) {
-        /* Only report finished after wave_read has had a chance to
-         * attempt the track crossover (frames_read == 0 path).
-         * Check that the mixer is no longer playing. */
+        /* FLAC tracks report finished when all frames have been read
+         * and the mixer is no longer playing. */
         return t->current_pcm_frame >= t->total_pcm_frames
             && !mixer_ch_playing(SOUND_MP3_PLAYER_CHANNEL);
     }
@@ -511,18 +503,7 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
                 t->current_pcm_frame += frames_read;
                 wlen -= out_frames;
             } else {
-                /* FLAC track exhausted. Try track crossover. */
-                if (p->next_ready && p->next.loaded) {
-                    track_unload(&p->current);
-                    memcpy(&p->current, &p->next, sizeof(audio_track_t));
-                    memset(&p->next, 0, sizeof(audio_track_t));
-                    p->next_ready = false;
-                    p->track_advanced = true;
-
-                    t = &p->current;
-                    continue;
-                }
-
+                /* FLAC track exhausted — fill remaining with silence. */
                 write_silence(sbuf, wlen, t->channels);
                 wlen = 0;
             }
@@ -561,20 +542,7 @@ static void mp3player_wave_read (void *ctx, samplebuffer_t *sbuf, int wpos, int 
         t->buffer_left -= t->info.frame_bytes;
 
         if (t->info.frame_bytes == 0) {
-            /* Current track exhausted. Try track crossover. */
-            if (p->next_ready && p->next.loaded) {
-                ptrdiff_t buf_off = p->next.buffer_ptr - p->next.buffer;
-                track_unload(&p->current);
-                memcpy(&p->current, &p->next, sizeof(audio_track_t));
-                p->current.buffer_ptr = p->current.buffer + buf_off;
-                memset(&p->next, 0, sizeof(audio_track_t));
-                p->next_ready = false;
-                p->track_advanced = true;
-
-                t = &p->current;
-                continue;
-            }
-
+            /* MP3 track exhausted — fill remaining with silence. */
             short *out = (short *)(samplebuffer_append(sbuf, wlen));
             memset(out, 0, wlen * sizeof(short) * t->channels);
             wlen = 0;
@@ -610,8 +578,6 @@ mp3player_err_t mp3player_init (void) {
 void mp3player_deinit (void) {
     if (!p) return;
     mp3player_unload();
-    if (p->next.loaded) track_unload(&p->next);
-    p->next_ready = false;
     id3_free_cover_art();
     free(p);
     p = NULL;
@@ -622,9 +588,6 @@ mp3player_err_t mp3player_load (char *path) {
         mp3player_stop();
         track_unload(&p->current);
     }
-    if (p->next.loaded) track_unload(&p->next);
-    p->next_ready = false;
-    p->track_advanced = false;
 
     mp3player_err_t err = track_load(&p->current, path, ID3_FLAG_EXTRACT_ART);
     if (err != MP3PLAYER_OK) return err;
@@ -648,30 +611,6 @@ mp3player_err_t mp3player_process (void) {
         return MP3PLAYER_ERR_IO;
     }
 
-    /* If wave_read performed a crossover, update the waveform format
-     * from the main thread (wave_read runs in the audio callback). */
-    if (p->track_advanced) {
-        p->wave.channels = p->current.channels;
-        p->wave.frequency = p->current.samplerate;
-    }
-
-    /* If the track ended and a preloaded next is waiting but the mixer
-     * already stopped (wave_read never got to do the crossover), swap here. */
-    if (track_is_finished(&p->current) && p->next_ready && !mp3player_is_playing()) {
-        ptrdiff_t buf_off = p->next.buffer_ptr - p->next.buffer;
-        track_unload(&p->current);
-        memcpy(&p->current, &p->next, sizeof(audio_track_t));
-        p->current.buffer_ptr = p->current.buffer + buf_off;
-        memset(&p->next, 0, sizeof(audio_track_t));
-        p->next_ready = false;
-        p->track_advanced = true;
-
-        p->wave.channels = p->current.channels;
-        p->wave.frequency = p->current.samplerate;
-        mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
-        return MP3PLAYER_OK;
-    }
-
     if (mp3player_is_finished()) {
         mp3player_stop();
     }
@@ -685,14 +624,14 @@ bool mp3player_is_playing (void) {
 
 bool mp3player_is_finished (void) {
     if (!p->current.loaded) return false;
-    return track_is_finished(&p->current) && !p->next_ready;
+    return track_is_finished(&p->current);
 }
 
 mp3player_err_t mp3player_play (void) {
     if (!p->current.loaded) return MP3PLAYER_ERR_NO_FILE;
 
     if (!mp3player_is_playing()) {
-        if (track_is_finished(&p->current) && !p->next_ready) {
+        if (track_is_finished(&p->current)) {
             /* Restart from beginning */
             if (p->current.format == AUDIO_FORMAT_FLAC) {
                 drflac_seek_to_pcm_frame(p->current.flac, 0);
@@ -830,49 +769,3 @@ const id3_metadata_t *mp3player_get_metadata (void) {
     return &p->current.metadata;
 }
 
-mp3player_err_t mp3player_preload_next (char *path) {
-    if (p->next.loaded) track_unload(&p->next);
-    p->next_ready = false;
-    p->next_path[0] = '\0';
-
-    mp3player_err_t err = track_load(&p->next, path, 0);
-    if (err != MP3PLAYER_OK) return err;
-
-    p->next_ready = true;
-    strncpy(p->next_path, path, sizeof(p->next_path) - 1);
-    p->next_path[sizeof(p->next_path) - 1] = '\0';
-    return MP3PLAYER_OK;
-}
-
-bool mp3player_preload_matches (char *path) {
-    return p && p->next_ready && p->next.loaded && p->next_path[0] &&
-           strcmp(p->next_path, path) == 0;
-}
-
-mp3player_err_t mp3player_play_preloaded (void) {
-    if (!p || !p->next_ready || !p->next.loaded) return MP3PLAYER_ERR_NO_FILE;
-
-    /* Stop current and swap */
-    mp3player_stop();
-    track_unload(&p->current);
-
-    ptrdiff_t buf_off = p->next.buffer_ptr - p->next.buffer;
-    memcpy(&p->current, &p->next, sizeof(audio_track_t));
-    p->current.buffer_ptr = p->current.buffer + buf_off;
-    memset(&p->next, 0, sizeof(audio_track_t));
-    p->next_ready = false;
-    p->next_path[0] = '\0';
-
-    p->wave.channels = p->current.channels;
-    p->wave.frequency = p->current.samplerate;
-
-    return mp3player_play();
-}
-
-bool mp3player_did_advance (void) {
-    if (p && p->track_advanced) {
-        p->track_advanced = false;
-        return true;
-    }
-    return false;
-}
