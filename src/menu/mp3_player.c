@@ -692,9 +692,16 @@ mp3player_err_t mp3player_seek (int seconds) {
         return MP3PLAYER_OK;
     }
 
-    /* MP3 seek */
+    /* MP3 seek — stop the mixer to prevent wave_read from using the
+     * file handle and buffer state while we mutate them. */
+    bool was_playing = mp3player_is_playing();
+    if (was_playing) mixer_ch_stop(SOUND_MP3_PLAYER_CHANNEL);
+
     long bytes_to_move = (long)((p->current.bitrate * seconds) / 8);
-    if (bytes_to_move == 0) return MP3PLAYER_OK;
+    if (bytes_to_move == 0) {
+        if (was_playing) mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
+        return MP3PLAYER_OK;
+    }
 
     long position = (ftell(p->current.f) - p->current.buffer_left + bytes_to_move);
     if (position < (long)(p->current.data_start)) {
@@ -705,6 +712,7 @@ mp3player_err_t mp3player_seek (int seconds) {
     }
 
     if (fseek(p->current.f, position, SEEK_SET)) {
+        if (was_playing) mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
         return MP3PLAYER_ERR_IO;
     }
 
@@ -712,10 +720,14 @@ mp3player_err_t mp3player_seek (int seconds) {
     mp3_fill_buffer(&p->current);
     p->current.file_pos = ftell(p->current.f);
 
-    if (ferror(p->current.f)) return MP3PLAYER_ERR_IO;
+    if (ferror(p->current.f)) {
+        if (was_playing) mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
+        return MP3PLAYER_ERR_IO;
+    }
 
     p->current.seek_predecode_frames = (position == p->current.data_start) ? 0 : SEEK_PREDECODE_FRAMES;
 
+    if (was_playing) mixer_ch_play(SOUND_MP3_PLAYER_CHANNEL, &p->wave);
     return MP3PLAYER_OK;
 }
 
