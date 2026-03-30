@@ -15,6 +15,8 @@ void utf16_to_utf8(const uint8_t *src, size_t src_len,
                    char *dst, size_t dst_size, bool big_endian) {
     size_t out = 0;
 
+    if (dst_size == 0) return;
+
     /* Detect and consume BOM */
     if (src_len >= 2) {
         if (src[0] == 0xFF && src[1] == 0xFE) {
