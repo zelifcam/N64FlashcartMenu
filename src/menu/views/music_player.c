@@ -378,8 +378,15 @@ static void find_cover_art_source (path_t *directory, char *out_path, size_t out
     const id3_metadata_t *meta = mp3player_get_metadata();
 
     if (meta->has_cover_art && meta->cover_art_data) {
-        snprintf(out_path, out_size, "embedded:%lu",
-                 (unsigned long)meta->cover_art_size);
+        /* Hash the image data for the cache key. The buffer already
+         * passed the memory check so it's reasonably sized, and this
+         * only runs once per track change. */
+        uint32_t hash = 5381;
+        for (size_t i = 0; i < meta->cover_art_size; i++) {
+            hash = ((hash << 5) + hash) ^ meta->cover_art_data[i];
+        }
+        snprintf(out_path, out_size, "embedded:%08lx",
+                 (unsigned long)hash);
         return;
     }
 
