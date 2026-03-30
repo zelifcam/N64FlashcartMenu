@@ -245,21 +245,22 @@ static audio_format_t detect_format (const char *path) {
 }
 
 static void track_unload (audio_track_t *t) {
-    if (!t->loaded) return;
-    t->loaded = false;
-    if (t->format == AUDIO_FORMAT_FLAC) {
-        if (t->flac) {
-            drflac_close(t->flac);
-            t->flac = NULL;
+    if (t->loaded) {
+        t->loaded = false;
+        if (t->format == AUDIO_FORMAT_FLAC) {
+            if (t->flac) {
+                drflac_close(t->flac);
+                t->flac = NULL;
+            }
+            free(t->flac_io);
+            t->flac_io = NULL;
+            /* With DR_FLAC_NO_STDIO, drflac_close only frees its context.
+             * We close the FILE handle ourselves below. */
         }
-        free(t->flac_io);
-        t->flac_io = NULL;
-        /* With DR_FLAC_NO_STDIO, drflac_close only frees its context.
-         * We close the FILE handle ourselves below. */
-    }
-    if (t->f) {
-        fclose(t->f);
-        t->f = NULL;
+        if (t->f) {
+            fclose(t->f);
+            t->f = NULL;
+        }
     }
     free(t->filebuf);
     t->filebuf = NULL;
