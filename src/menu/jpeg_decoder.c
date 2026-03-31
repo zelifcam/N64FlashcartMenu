@@ -94,7 +94,7 @@ static jpeg_err_t jpeg_decoder_setup (int max_width, int max_height) {
     if (is_progressive) {
         coeff_cost = (size_t)decoder->cinfo.image_width
                    * decoder->cinfo.image_height
-                   * decoder->cinfo.num_components * sizeof(JCOEF) * 2;
+                   * decoder->cinfo.num_components * sizeof(JCOEF);
     }
 
     decoder->cinfo.dct_method = JDCT_IFAST;

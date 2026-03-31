@@ -6,6 +6,7 @@
 #include "../png_decoder.h"
 #include "views.h"
 #include "utils/fs.h"
+#include "utils/utils.h"
 
 
 
@@ -160,15 +161,19 @@ void view_image_viewer_init (menu_t *menu) {
     static const char *jpeg_extensions[] = { "jpg", "jpeg", NULL };
     is_jpeg = file_has_extensions(menu->browser.entry->name, jpeg_extensions);
 
+    int max_dim = image_budget_max_dimension();
+    int max_w = (max_dim > 640) ? 640 : max_dim;
+    int max_h = (max_dim > 480) ? 480 : max_dim;
+
     if (is_jpeg) {
-        jpeg_err_t err = jpeg_decoder_start(path_get(path), 640, 480,
+        jpeg_err_t err = jpeg_decoder_start(path_get(path), max_w, max_h,
                                             jpeg_cb, menu);
         if (err != JPEG_OK) {
             image_loading = false;
             menu_show_error(menu, convert_error_message(err, true));
         }
     } else {
-        png_err_t err = png_decoder_start(path_get(path), 640, 480,
+        png_err_t err = png_decoder_start(path_get(path), max_w, max_h,
                                           png_cb, menu);
         if (err != PNG_OK) {
             image_loading = false;

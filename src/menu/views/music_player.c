@@ -9,6 +9,7 @@
 #include "../path.h"
 #include "../ui_components/constants.h"
 #include "utils/fs.h"
+#include "utils/utils.h"
 #include "views.h"
 
 
@@ -25,7 +26,6 @@
 #define TICKER_SCROLL_SPEED     (0.5f)
 #define COVER_SCAN_MAX_ATTEMPTS (20)
 #define COVER_ART_BUDGET_MAX    (400)
-#define COVER_ART_BUDGET_MIN    (16)
 
 typedef enum {
     PLAYBACK_NORMAL,
@@ -217,16 +217,14 @@ static void cover_cache_blit_params (void) {
 
 /** Get the memory budget for cover art decode, based on free heap. */
 static int cover_art_budget_size (void) {
+    int dim = image_budget_max_dimension();
+    /* Clamp upward if heap can actually support the preferred cover art size */
+    size_t min_surface = (size_t)COVER_ART_MAX_SIZE * COVER_ART_MAX_SIZE * 2;
     heap_stats_t heap;
     sys_get_heap_stats(&heap);
-    size_t free_mem = (size_t)(heap.total - heap.used);
-    size_t budget = (size_t)(free_mem * 0.8f);
-    int dim = (int)sqrtf((float)(budget / 2));
-    /* Only clamp upward if heap can actually support the surface */
-    size_t min_surface = (size_t)COVER_ART_MAX_SIZE * COVER_ART_MAX_SIZE * 2;
+    size_t budget = (size_t)((heap.total - heap.used) * 0.8f);
     if (dim < COVER_ART_MAX_SIZE && budget > min_surface) dim = COVER_ART_MAX_SIZE;
     if (dim > COVER_ART_BUDGET_MAX) dim = COVER_ART_BUDGET_MAX;
-    if (dim < COVER_ART_BUDGET_MIN) dim = COVER_ART_BUDGET_MIN;
     return dim;
 }
 
@@ -278,30 +276,51 @@ static void cover_art_png_cb (png_err_t err, surface_t *image, void *data) {
 static const char *jpeg_extensions[] = { "jpg", "jpeg", NULL };
 static const char *png_extensions[] = { "png", NULL };
 
+/** Read a file into a heap buffer. Returns NULL on failure. */
+static uint8_t *slurp_file (const char *path, size_t *out_size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    size_t sz = (size_t)ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = malloc(sz);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, sz, f) != sz) { free(buf); fclose(f); return NULL; }
+    fclose(f);
+    *out_size = sz;
+    return buf;
+}
+
 static bool try_cover_path (const char *path, int max_size) {
-    if (file_has_extensions((char *)path, jpeg_extensions)) {
+    bool is_jpeg = file_has_extensions((char *)path, jpeg_extensions);
+    bool is_png  = file_has_extensions((char *)path, png_extensions);
+    if (!is_jpeg && !is_png) return false;
+
+    if (is_png && !png_dimensions_ok(path, max_size)) return false;
+
+    /* Read entire file into memory to avoid SD card contention with audio */
+    size_t buf_size;
+    uint8_t *buf = slurp_file(path, &buf_size);
+    if (!buf) return false;
+
+    if (is_jpeg) {
         cover_state = COVER_LOADING_JPEG;
-        jpeg_err_t err = jpeg_decoder_start((char *)path, max_size, max_size,
-                                            cover_art_cb, NULL);
+        jpeg_err_t err = jpeg_decoder_start_mem(buf, buf_size, max_size, max_size,
+                                                cover_art_cb, NULL);
         if (err != JPEG_OK) {
             cover_state = COVER_IDLE;
             return false;
         }
-        return true;
-    } else if (file_has_extensions((char *)path, png_extensions)) {
-        if (!png_dimensions_ok(path, max_size)) {
-            return false;
-        }
+    } else {
         cover_state = COVER_LOADING_PNG;
-        png_err_t err = png_decoder_start((char *)path, max_size, max_size,
-                                          cover_art_png_cb, NULL);
+        png_err_t err = png_decoder_start_mem(buf, buf_size, max_size, max_size,
+                                              cover_art_png_cb, NULL);
         if (err != PNG_OK) {
             cover_state = COVER_IDLE;
             return false;
         }
-        return true;
     }
-    return false;
+    return true;
 }
 
 /** Continue scanning the directory for the next image file. */
@@ -361,6 +380,7 @@ static void scan_directory_for_cover (path_t *dir) {
         }
     }
 
+
     /* Second pass: fall back to first image file found */
     if (cover_dir) { path_free(cover_dir); cover_dir = NULL; }
     cover_dir = path_clone(dir);
@@ -377,16 +397,23 @@ static void find_cover_art_source (path_t *directory, char *out_path, size_t out
 
     const id3_metadata_t *meta = mp3player_get_metadata();
 
-    if (meta->has_cover_art && meta->cover_art_data) {
-        /* Hash the image data for the cache key. The buffer already
-         * passed the memory check so it's reasonably sized, and this
-         * only runs once per track change. */
-        uint32_t hash = 5381;
-        for (size_t i = 0; i < meta->cover_art_size; i++) {
-            hash = ((hash << 5) + hash) ^ meta->cover_art_data[i];
+    if (meta->has_cover_art) {
+        if (meta->cover_art_data) {
+            /* Hash the image data for the cache key. The buffer already
+             * passed the memory check so it's reasonably sized, and this
+             * only runs once per track change. */
+            uint32_t hash = 5381;
+            for (size_t i = 0; i < meta->cover_art_size; i++) {
+                hash = ((hash << 5) + hash) ^ meta->cover_art_data[i];
+            }
+            snprintf(out_path, out_size, "embedded:%08lx",
+                     (unsigned long)hash);
+        } else {
+            /* Buffer was already taken by a previous decode — reuse the
+             * cached source key so we don't trigger a redundant reload. */
+            strncpy(out_path, cover_art_source, out_size - 1);
+            out_path[out_size - 1] = '\0';
         }
-        snprintf(out_path, out_size, "embedded:%08lx",
-                 (unsigned long)hash);
         return;
     }
 
@@ -492,6 +519,11 @@ static void load_cover_art (path_t *directory) {
 
     /* Fall back to directory scan */
     scan_directory_for_cover(directory);
+
+    /* If nothing is decoding at this point, give up */
+    if (cover_state == COVER_IDLE) {
+        cover_art_expected = false;
+    }
 }
 
 /** Escape '$' and '^' characters that rdpq_text interprets as control codes.
@@ -623,6 +655,7 @@ static bool try_skip_track (menu_t *menu, int direction) {
                 build_shuffle_list(menu);
                 shuffle_pos = 0;
             } else {
+                shuffle_pos = shuffle_count - 1;
                 return false;
             }
         }
@@ -950,9 +983,13 @@ static void draw (menu_t *menu, surface_t *d) {
             .filtering = true,
         });
         rdpq_mode_pop();
-    } else if (cover_art_expected && art_size > 0 && cover_first_load) {
-        /* "Loading..." text centered in art area */
-        const char *loading_text = "Loading...";
+    } else if (cover_art_expected && art_size > 0 && cover_state != COVER_IDLE) {
+        /* Show decode progress centered in art area */
+        float progress = (cover_state == COVER_LOADING_JPEG)
+                       ? jpeg_decoder_get_progress()
+                       : png_decoder_get_progress();
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%%", (int)(progress * 100));
         rdpq_text_printn(
             &(rdpq_textparms_t) {
                 .style_id = STL_GRAY,
@@ -961,7 +998,7 @@ static void draw (menu_t *menu, surface_t *d) {
             },
             FNT_DEFAULT,
             art_x, art_y + art_size / 2,
-            loading_text, strlen(loading_text)
+            buf, strlen(buf)
         );
     }
 
@@ -1105,9 +1142,9 @@ static const float loading_progress[] = {
     0.00f,  /* step 0: mp3player_init */
     0.15f,  /* step 1: mp3player_load */
     0.40f,  /* step 2: build music index */
-    0.60f,  /* step 3: sound init */
-    0.80f,  /* step 4: cover art */
-    0.95f,  /* done, transitions immediately */
+    0.60f,  /* step 3: cover art load */
+    0.80f,  /* step 4: cover art decode */
+    0.95f,  /* step 5: sound init + play */
 };
 
 static void draw_loading_screen (surface_t *d) {
@@ -1155,20 +1192,21 @@ static bool loading_tick (menu_t *menu) {
             return false;
         }
         case 3: {
-            sound_init_mp3_playback();
-            mp3player_mute(false);
-            loading_step++;
-            return false;
-        }
-        case 4: {
             load_cover_art(menu->browser.directory);
             loading_step++;
             return false;
         }
-        default: {
-            /* Transition as soon as cover art finishes (or no art expected) */
+        case 4: {
+            /* Wait for cover art decode to finish before starting audio */
             bool art_done = (cover_image != NULL) || !cover_art_expected || (cover_state == COVER_IDLE);
-            return art_done;
+            if (!art_done) return false;
+            loading_step++;
+            return false;
+        }
+        default: {
+            sound_init_mp3_playback();
+            mp3player_mute(false);
+            return true;
         }
     }
 }
