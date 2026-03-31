@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <sys/stat.h>
 
 #include "../jpeg_decoder.h"
@@ -9,7 +10,6 @@
 #include "../path.h"
 #include "../ui_components/constants.h"
 #include "utils/fs.h"
-#include "utils/utils.h"
 #include "views.h"
 
 
@@ -217,12 +217,13 @@ static void cover_cache_blit_params (void) {
 
 /** Get the memory budget for cover art decode, based on free heap. */
 static int cover_art_budget_size (void) {
-    int dim = image_budget_max_dimension();
-    /* Clamp upward if heap can actually support the preferred cover art size */
-    size_t min_surface = (size_t)COVER_ART_MAX_SIZE * COVER_ART_MAX_SIZE * 2;
     heap_stats_t heap;
     sys_get_heap_stats(&heap);
     size_t budget = (size_t)((heap.total - heap.used) * 0.8f);
+    int dim = (int)sqrtf((float)(budget / 2));
+    if (dim < 16) dim = 16;
+    /* Clamp upward if heap can actually support the preferred cover art size */
+    size_t min_surface = (size_t)COVER_ART_MAX_SIZE * COVER_ART_MAX_SIZE * 2;
     if (dim < COVER_ART_MAX_SIZE && budget > min_surface) dim = COVER_ART_MAX_SIZE;
     if (dim > COVER_ART_BUDGET_MAX) dim = COVER_ART_BUDGET_MAX;
     return dim;
@@ -276,13 +277,14 @@ static void cover_art_png_cb (png_err_t err, surface_t *image, void *data) {
 static const char *jpeg_extensions[] = { "jpg", "jpeg", NULL };
 static const char *png_extensions[] = { "png", NULL };
 
-/** Read a file into a heap buffer. Returns NULL on failure. */
+/** Read a file into a heap buffer. Returns NULL on failure or if too large. */
 static uint8_t *slurp_file (const char *path, size_t *out_size) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     size_t sz = (size_t)ftell(f);
     fseek(f, 0, SEEK_SET);
+    if (sz == 0 || sz > 2 * 1024 * 1024) { fclose(f); return NULL; }
     uint8_t *buf = malloc(sz);
     if (!buf) { fclose(f); return NULL; }
     if (fread(buf, 1, sz, f) != sz) { free(buf); fclose(f); return NULL; }
@@ -379,7 +381,6 @@ static void scan_directory_for_cover (path_t *dir) {
             path_free(candidate);
         }
     }
-
 
     /* Second pass: fall back to first image file found */
     if (cover_dir) { path_free(cover_dir); cover_dir = NULL; }

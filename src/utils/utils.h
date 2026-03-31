@@ -3,22 +3,9 @@
 
 /**
  * @file utils.h
- * @brief Utility macros and helpers for alignment, min/max, size conversions, and memory budgeting.
+ * @brief Utility macros for alignment, min/max, and size conversions.
  * @ingroup utils
  */
-
-#include <math.h>
-#include <n64sys.h>
-
-static inline int image_budget_max_dimension (void) {
-    heap_stats_t heap;
-    sys_get_heap_stats(&heap);
-    size_t free_mem = (size_t)(heap.total - heap.used);
-    size_t budget = (size_t)(free_mem * 0.8f);
-    int dim = (int)sqrtf((float)(budget / 2));
-    if (dim < 16) dim = 16;
-    return dim;
-}
 
 /**
  * @def ALIGN(x, a)

@@ -1,21 +1,29 @@
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <libdragon.h>
 #include "../sound.h"
 
 #include "../jpeg_decoder.h"
 #include "../png_decoder.h"
 #include "views.h"
 #include "utils/fs.h"
-#include "utils/utils.h"
 
-
+/** Max image dimension that fits in 80% of free heap (2 bytes/pixel). */
+static int image_budget_max_dimension (void) {
+    heap_stats_t heap;
+    sys_get_heap_stats(&heap);
+    size_t budget = (size_t)((heap.total - heap.used) * 0.8f);
+    int dim = (int)sqrtf((float)(budget / 2));
+    if (dim < 16) dim = 16;
+    return dim;
+}
 
 static bool show_message;
 static bool image_loading;
 static bool image_set_as_background;
 static bool is_jpeg;
 static surface_t *image;
-
 
 static char *convert_error_message (int err, bool jpeg) {
     if (jpeg) {
@@ -45,7 +53,6 @@ static void png_cb (png_err_t err, surface_t *decoded_image, void *callback_data
     image_loading = false;
     image = decoded_image;
 
-
     if (err != PNG_OK) {
         menu_show_error(menu, convert_error_message(err, false));
     }
@@ -57,12 +64,10 @@ static void jpeg_cb (jpeg_err_t err, surface_t *decoded_image, void *callback_da
     image_loading = false;
     image = decoded_image;
 
-
     if (err != JPEG_OK) {
         menu_show_error(menu, convert_error_message(err, true));
     }
 }
-
 
 static void process (menu_t *menu) {
     if (menu->actions.back) {
@@ -128,7 +133,6 @@ static void draw (menu_t *menu, surface_t *d) {
 }
 
 static void deinit (menu_t *menu) {
-
     if (image_loading) {
         if (is_jpeg) {
             jpeg_decoder_abort();
@@ -146,12 +150,9 @@ static void deinit (menu_t *menu) {
         }
     }
     image = NULL;
-
 }
 
-
 void view_image_viewer_init (menu_t *menu) {
-
     show_message = false;
     image_loading = true;
     image_set_as_background = false;

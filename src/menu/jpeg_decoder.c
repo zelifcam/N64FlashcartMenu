@@ -15,7 +15,7 @@
 #include <jpeglib.h>
 #include "jpeg_decoder.h"
 
-#define SCANLINES_PER_POLL  (32)
+#define SCANLINES_PER_POLL  (1)
 
 /* libjpeg error handler that longjmps instead of calling exit(). */
 typedef struct {
