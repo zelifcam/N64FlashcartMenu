@@ -1141,11 +1141,12 @@ static void deinit (void) {
  * never sits at 100% waiting for async cover art decode. */
 static const float loading_progress[] = {
     0.00f,  /* step 0: mp3player_init */
-    0.15f,  /* step 1: mp3player_load */
-    0.40f,  /* step 2: build music index */
-    0.60f,  /* step 3: cover art load */
-    0.80f,  /* step 4: cover art decode */
-    0.95f,  /* step 5: sound init + play */
+    0.10f,  /* step 1: mp3player_load */
+    0.20f,  /* step 2: sound reconfigure */
+    0.40f,  /* step 3: build music index */
+    0.60f,  /* step 4: cover art load */
+    0.80f,  /* step 5: cover art decode */
+    0.95f,  /* step 6: play */
 };
 
 static void draw_loading_screen (surface_t *d) {
@@ -1188,16 +1189,23 @@ static bool loading_tick (menu_t *menu) {
             return false;
         }
         case 2: {
-            build_music_index_map(menu);
+            /* Reconfigure audio to the track's sample rate early, so the
+             * hardware has settled well before playback starts. */
+            sound_init_mp3_playback();
             loading_step++;
             return false;
         }
         case 3: {
-            load_cover_art(menu->browser.directory);
+            build_music_index_map(menu);
             loading_step++;
             return false;
         }
         case 4: {
+            load_cover_art(menu->browser.directory);
+            loading_step++;
+            return false;
+        }
+        case 5: {
             /* Wait for cover art decode to finish before starting audio */
             bool art_done = (cover_image != NULL) || !cover_art_expected || (cover_state == COVER_IDLE);
             if (!art_done) return false;
@@ -1205,7 +1213,6 @@ static bool loading_tick (menu_t *menu) {
             return false;
         }
         default: {
-            sound_init_mp3_playback();
             mp3player_mute(false);
             return true;
         }
