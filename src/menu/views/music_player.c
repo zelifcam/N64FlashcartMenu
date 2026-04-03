@@ -616,6 +616,7 @@ static bool try_play_index (menu_t *menu, int idx) {
     path_free(path);
     if (err != MP3PLAYER_OK) return false;
 
+    sound_init_mp3_playback();
     err = mp3player_play();
     if (err != MP3PLAYER_OK) return false;
 

@@ -73,7 +73,7 @@ typedef struct {
     flac_io_t *flac_io;  /* heap-allocated; drflac stores this pointer internally */
     drflac *flac;
     drflac_uint64 total_pcm_frames;
-    drflac_uint64 current_pcm_frame;
+    volatile drflac_uint64 current_pcm_frame;
     int downsample;    /* 1 = native, 2 = halve, 4 = quarter, etc. */
     int native_rate;   /* original sample rate before downsampling */
     char *filebuf;     /* stdio buffer for FLAC, reduces SD card round-trips */
@@ -420,10 +420,8 @@ static mp3player_err_t track_load (audio_track_t *t, char *path, int id3_flags) 
 static bool track_is_finished (audio_track_t *t) {
     if (!t->loaded) return false;
     if (t->format == AUDIO_FORMAT_FLAC) {
-        /* FLAC tracks report finished when all frames have been read
-         * and the mixer is no longer playing. */
-        return t->current_pcm_frame >= t->total_pcm_frames
-            && !mixer_ch_playing(SOUND_MP3_PLAYER_CHANNEL);
+        return t->total_pcm_frames > 0
+            && t->current_pcm_frame >= t->total_pcm_frames;
     }
     return feof(t->f) && (t->buffer_left == 0);
 }
