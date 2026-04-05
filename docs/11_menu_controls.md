@@ -3,7 +3,7 @@ All menu interactions are performed using the controller and its associated butt
 ![Controller button layout](./images/controller.png "Controller button layout") 
 
 ### File Browser
-See [File Brower operations](31_file_browser.md) for additional information.
+See [File Broswer operations](31_file_browser.md) for additional information.
 
 #### Fast scroll
 Press either the `C-Up` or `C-Down` buttons to scroll by pages, rather than by elements.
