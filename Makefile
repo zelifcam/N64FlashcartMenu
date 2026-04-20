@@ -64,11 +64,11 @@ SRCS = \
 	libs/libjpeg-turbo/jdphuff.c \
 	libs/libjpeg-turbo/jidctred.c \
 	libs/libjpeg-turbo/jsimd_none.c \
-	libs/mini.c/src/mini.c \
 	libs/miniz/miniz_tdef.c \
 	libs/miniz/miniz_tinfl.c \
 	libs/miniz/miniz_zip.c \
 	libs/miniz/miniz.c \
+	menu/ini_parser.c \
 	menu/actions.c \
 	menu/bookkeeping.c \
 	menu/cart_load.c \

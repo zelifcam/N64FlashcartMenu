@@ -9,6 +9,8 @@
 - **New Features**
 	- ~~Browser now allows hiding files and folders with hidden attributes set (thanks [Xeroxxx](https://github.com/Xeroxxx)).~~ Awaiting performance enhancement.
 	- Adds settings to hide cheat and save file types in the browser.
+	- Adds ability to display embedded homebrew ROM metadata in ROM info.
+	- Adds ability to display Commercial game metadate using ROM DB.
 
 - **Bug Fixes**
 	- Neon64 1Mbit SRAM.
@@ -19,20 +21,21 @@
 
 - **Refactor**
 	- PAL60 (using new libdragon support).
-	- Age ratings (align with homebrew metadata standard).
-	- rom metadata (align with homebrew metadata standard, still requires zip extraction support).
-	- menu credits.
+	- ROM view, Age ratings and other metadata now align and support homebrew metadata standard.
+	- Menu credits.
+	- Disk Drive, disk info view.
+	- CPak manager, Added menu option to for notes restore.
+	- Replace mini.c INI lib with custom implementation.
 
 - **Other**
 	- Updated libDragon {preview} SDK.
 	- Updated miniz lib.
 	- Updated minimp3
-	- Add docfx devcontiner.
+	- Add docfx devcontainer.
 	- Remove rolling prerelease (all releases to main should be tagged).
 	- Added AI instructions to repo.
-	- Improved disk view.
 	- Added an extra build option (run-debug-reboot) that aids debugging remotely without the need for uploading files to the SD card.
-	- Added menu option to CPak manager for notes restore.
+	
 
 ### Breaking changes
 - (as of 2026-03-15) libdragon SDK (and this menu) now requires MI repeat mode support, (supported by latest Ares and Gopher64, A3D also works though needs the latest FW). 
