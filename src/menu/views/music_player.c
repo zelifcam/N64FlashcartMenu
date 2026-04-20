@@ -721,6 +721,14 @@ static void process (menu_t *menu) {
         advance_failed = false;
         if (playback_mode == PLAYBACK_SHUFFLE || playback_mode == PLAYBACK_PARTY) {
             build_shuffle_list(menu);
+            /* Anchor to the currently playing track so the next advance
+             * moves past it rather than skipping shuffle_list[0]. */
+            for (int i = 0; i < shuffle_count; i++) {
+                if (shuffle_list[i] == menu->browser.selected) {
+                    shuffle_pos = i;
+                    break;
+                }
+            }
         }
     } else if (menu->actions.go_up || menu->actions.go_down) {
         try_skip_track(menu, menu->actions.go_up ? -1 : 1);
