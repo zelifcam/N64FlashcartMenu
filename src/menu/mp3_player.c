@@ -382,7 +382,7 @@ static mp3player_err_t track_load_flac (audio_track_t *t, int id3_flags) {
 }
 
 static mp3player_err_t track_load (audio_track_t *t, char *path, int id3_flags) {
-    if (t->loaded) track_unload(t);
+    track_unload(t);
 
     memset(t, 0, sizeof(*t));
     t->format = detect_format(path);
