@@ -49,7 +49,8 @@
 - Menu sound FX may not work properly when a 64 Disk Drive is also attached (work around: turn sound FX off).
 - Fast Rebooting a 64DD disk once will result in a blank screen. Twice will return to menu. This is expected until disk swapping is fully implemented.
 - Some users have reported crashes in Zelda OOT (anti piracy checks). Menu V0.2.0 works as expected.
-- A user has reported that the menu crashes with a CPU exception. Menu V0.2.0 works as expected.
+- A user has reported that the menu fails to load RTYI demo 2.
+- PixelFX HDMI mods may need to be updated to latest FW to support display.
 
 
 ### Deprecation notices
