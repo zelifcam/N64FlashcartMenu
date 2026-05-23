@@ -160,6 +160,7 @@ static void menu_deinit (menu_t *menu) {
 
     sound_deinit();
     
+    rspq_wait();  // Execute deferred callbacks before closing RSPQ
     rspq_close();
     rdpq_close();
     rtc_close();
