@@ -60,6 +60,7 @@ static void set_soundfx_enabled_type (menu_t *menu, void *arg) {
 
 static void set_bgm_enabled_type (menu_t *menu, void *arg) {
     menu->settings.bgm_enabled = (bool)(uintptr_t)(arg);
+    sound_use_bgm(menu->settings.bgm_enabled);
     settings_save(&menu->settings);
 }
 

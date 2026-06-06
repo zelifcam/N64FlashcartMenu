@@ -86,8 +86,6 @@ void sound_init_bgm (void) {
     wav64_open(&bgm, "rom:/bgm.wav64");
     wav64_set_loop(&bgm, true);
     mixer_ch_set_vol(SOUND_BGM_CHANNEL, 0.1f, 0.1f);
-    wav64_play(&bgm, SOUND_BGM_CHANNEL);
-    bgm_enabled = true;
 }
 
 /**
@@ -106,6 +104,11 @@ void sound_use_sfx(bool state) {
  */
 void sound_use_bgm(bool state) {
     bgm_enabled = state;
+    if (bgm_enabled) {
+        wav64_play(&bgm, SOUND_BGM_CHANNEL);
+    } else {
+        mixer_ch_stop(SOUND_BGM_CHANNEL);
+    }
 }
 
 /**
