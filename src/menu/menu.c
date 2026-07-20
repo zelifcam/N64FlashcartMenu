@@ -14,6 +14,7 @@
 #include "boot/boot.h"
 #include "flashcart/flashcart.h"
 #include "fonts.h"
+#include "background_music.h"
 #include "hdmi.h"
 #include "menu_state.h"
 #include "menu.h"
@@ -29,6 +30,7 @@
 #define MENU_DIRECTORY              "/menu"
 #define MENU_SETTINGS_FILE          "config.ini"
 #define MENU_CUSTOM_FONT_FILE       "custom.font64"
+#define MENU_CUSTOM_BGM_FILE        "custom.wav64"
 #define MENU_ROM_LOAD_HISTORY_FILE  "history.ini"
 
 #define MENU_CACHE_DIRECTORY        "cache"
@@ -69,6 +71,7 @@ static void menu_init (boot_params_t *boot_params) {
     actions_init();
     sound_init_default();
     sound_init_sfx();
+    sound_init_bgm();
 
     hdmi_clear_game_id();
 
@@ -117,6 +120,10 @@ static void menu_init (boot_params_t *boot_params) {
     fonts_init(path_get(path));
     path_pop(path);
 
+    // path_push(path, MENU_CUSTOM_BGM_FILE);
+    // bgm_init(path_get(path));
+    // path_pop(path);
+
     path_push(path, MENU_CACHE_DIRECTORY);
     directory_create(path_get(path));
 
@@ -126,6 +133,7 @@ static void menu_init (boot_params_t *boot_params) {
     path_free(path);
 
     sound_use_sfx(menu->settings.soundfx_enabled);
+    sound_use_bgm(menu->settings.bgm_enabled);
 
     menu->browser.directory = path_init(menu->storage_prefix, menu->settings.default_directory);
     if (!directory_exists(path_get(menu->browser.directory))) {
